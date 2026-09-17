@@ -88,7 +88,7 @@ data, and `heap_max_in_bytes` the machine's memory; `_cat/nodes`'
 `heap.percent` is the one against the other. For the allocator's own view:
 
 ```bash
-curl -s localhost:9285/_boostsearch/memory | python3 -m json.tool
+curl -s localhost:9285/_velosearch/memory | python3 -m json.tool
 ```
 
 ## `_cat/thread_pool` shows 0 in `queue`
@@ -101,7 +101,7 @@ whose backlog is reported as the `generic` pool's `queue`.
 
 An entry is written to the node's log output, in OpenSearch's text, and to
 `<cluster>_index_search_slowlog.log` and `<cluster>_index_indexing_slowlog.log`
-in the directory named by `BOOSTSEARCH_LOGS` (or `path.logs`) when one is set.
+in the directory named by `VELOSEARCH_LOGS` (or `path.logs`) when one is set.
 
 ## Cleaning up
 

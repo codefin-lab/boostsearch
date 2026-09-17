@@ -37,13 +37,13 @@ fn cache() -> &'static RwLock<HashMap<String, Arc<Db>>> {
 /// told anything.
 fn database_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(d) = std::env::var("BOOSTSEARCH_GEOIP_PATH") {
+    if let Ok(d) = std::env::var("VELOSEARCH_GEOIP_PATH") {
         out.push(PathBuf::from(d));
     }
-    if let Ok(d) = std::env::var("BOOSTSEARCH_CONFIG") {
+    if let Ok(d) = std::env::var("VELOSEARCH_CONFIG") {
         out.push(PathBuf::from(&d).join("ingest-geoip"));
     }
-    if let Ok(d) = std::env::var("BOOSTSEARCH_DATA") {
+    if let Ok(d) = std::env::var("VELOSEARCH_DATA") {
         out.push(PathBuf::from(&d).join("config").join("ingest-geoip"));
         out.push(PathBuf::from(&d).join("..").join("config").join("ingest-geoip"));
     }

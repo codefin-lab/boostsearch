@@ -3,7 +3,7 @@
 # throttled, meeting writes they did not expect, and their results kept.
 source "$(dirname "$0")/lib.sh"
 IDX=parcels
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/boost-example-20.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/velo-example-20.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 # --- helpers of this example's own -------------------------------------------
@@ -29,7 +29,7 @@ expect() {
 
 # count BODY -- how many parcels a query matches
 count() {
-  "${CURL[@]}" -X POST "$BS/$IDX/_count" -H 'Content-Type: application/json' -d "$1" \
+  "${CURL[@]}" -X POST "$VS/$IDX/_count" -H 'Content-Type: application/json' -d "$1" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])'
 }
 
@@ -42,7 +42,7 @@ task_of() { pick "$1" 'd["task"]'; }
 follow() {
   local id=$1 out=$2 i=0
   while :; do
-    "${CURL[@]}" "$BS/_tasks/$id" > "$out"
+    "${CURL[@]}" "$VS/_tasks/$id" > "$out"
     python3 - "$out" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -143,7 +143,7 @@ for i in $(seq 75 150 6000); do
 done
 note "40 more parcels written and not refreshed; this time the job is waited for"
 NOFAIL=(curl -sS); [ -n "$AUTH" ] && NOFAIL+=(-u "$AUTH")
-"${NOFAIL[@]}" -X POST "$BS/$IDX/_update_by_query" -H 'Content-Type: application/json' \
+"${NOFAIL[@]}" -X POST "$VS/$IDX/_update_by_query" -H 'Content-Type: application/json' \
   --data-binary @requests/07-the-same-job-without-conflicts-proceed.json -w '\n%{http_code}\n' > "$WORK/abort.raw"
 python3 - "$WORK/abort.raw" "$WORK/abort.json" <<'PY'
 import sys

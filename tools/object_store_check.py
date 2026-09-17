@@ -9,7 +9,7 @@ see: the request signing, the layout written, and a restore that reads it back
 without the node that wrote it.
 
     docker run -d --name bs-minio -p 9401:9000 \\
-        -e MINIO_ROOT_USER=boostkey -e MINIO_ROOT_PASSWORD=boostsecret123 \\
+        -e MINIO_ROOT_USER=velokey -e MINIO_ROOT_PASSWORD=velosecret123 \\
         minio/minio:latest server /data
     docker run -d --name bs-azurite -p 9402:10000 \\
         mcr.microsoft.com/azure-storage/azurite:latest azurite-blob --blobHost 0.0.0.0
@@ -25,7 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
 AZURE_KEY = (
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 )
@@ -35,9 +35,9 @@ REPOSITORIES = {
         "type": "s3",
         "settings": {
             "bucket": "snapshots",
-            "endpoint": os.environ.get("BOOST_S3", "http://127.0.0.1:9401"),
-            "access_key": "boostkey",
-            "secret_key": "boostsecret123",
+            "endpoint": os.environ.get("VELO_S3", "http://127.0.0.1:9401"),
+            "access_key": "velokey",
+            "secret_key": "velosecret123",
             "path_style_access": True,
             "base_path": "boost",
         },
@@ -49,7 +49,7 @@ REPOSITORIES = {
             "account": "devstoreaccount1",
             "key": AZURE_KEY,
             "endpoint": os.environ.get(
-                "BOOST_AZURE", "http://127.0.0.1:9402/devstoreaccount1"
+                "VELO_AZURE", "http://127.0.0.1:9402/devstoreaccount1"
             ),
             "base_path": "boost",
         },
@@ -58,7 +58,7 @@ REPOSITORIES = {
         "type": "gcs",
         "settings": {
             "bucket": "snapshots",
-            "endpoint": os.environ.get("BOOST_GCS", "http://127.0.0.1:9403"),
+            "endpoint": os.environ.get("VELO_GCS", "http://127.0.0.1:9403"),
             "base_path": "boost",
         },
     },

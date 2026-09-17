@@ -8,7 +8,7 @@ whether a mixed-version cluster kept answering and kept every
 acknowledged write. With one binary given twice it is a rolling restart,
 which is the same test with nothing to upgrade.
 
-  rolling_upgrade.py --from ./target/release/boostsearch --to ./build/new/boostsearch
+  rolling_upgrade.py --from ./target/release/velosearch --to ./build/new/velosearch
 """
 import argparse, json, os, subprocess, sys, threading, time, urllib.error, urllib.request
 
@@ -26,8 +26,8 @@ def version_of(node):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--from", dest="old", default="./target/release/boostsearch")
-    ap.add_argument("--to", dest="new", default="./target/release/boostsearch")
+    ap.add_argument("--from", dest="old", default="./target/release/velosearch")
+    ap.add_argument("--to", dest="new", default="./target/release/velosearch")
     ap.add_argument("--index", default="upgrade")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=1)

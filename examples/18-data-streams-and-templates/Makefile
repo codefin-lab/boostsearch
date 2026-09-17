@@ -15,7 +15,7 @@ serve:
 	./node.sh
 
 run:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS="$${BS:-http://127.0.0.1:9278}" ./run.sh'
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS="$${VS:-http://127.0.0.1:9278}" ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -25,10 +25,10 @@ check:
 print('requests and data: valid JSON')"
 
 clean:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS=$${BS:-http://127.0.0.1:9278}; \
-for s in $(STREAMS); do curl -sS -X DELETE "$$BS/_data_stream/$$s" > /dev/null 2>&1 || true; done; \
-for i in $(INDICES); do curl -sS -X DELETE "$$BS/$$i" > /dev/null 2>&1 || true; done; \
-for t in $(TEMPLATES); do curl -sS -X DELETE "$$BS/_index_template/$$t" > /dev/null 2>&1 || true; done; \
-curl -sS -X DELETE "$$BS/_template/legacy-metrics" > /dev/null 2>&1 || true; \
-for c in metrics-settings metrics-mappings; do curl -sS -X DELETE "$$BS/_component_template/$$c" > /dev/null 2>&1 || true; done; \
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS=$${VS:-http://127.0.0.1:9278}; \
+for s in $(STREAMS); do curl -sS -X DELETE "$$VS/_data_stream/$$s" > /dev/null 2>&1 || true; done; \
+for i in $(INDICES); do curl -sS -X DELETE "$$VS/$$i" > /dev/null 2>&1 || true; done; \
+for t in $(TEMPLATES); do curl -sS -X DELETE "$$VS/_index_template/$$t" > /dev/null 2>&1 || true; done; \
+curl -sS -X DELETE "$$VS/_template/legacy-metrics" > /dev/null 2>&1 || true; \
+for c in metrics-settings metrics-mappings; do curl -sS -X DELETE "$$VS/_component_template/$$c" > /dev/null 2>&1 || true; done; \
 echo "deleted: streams $(STREAMS), indices $(INDICES), their templates"'

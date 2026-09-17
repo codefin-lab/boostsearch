@@ -1,8 +1,8 @@
-use boostcore::query::{AutomatonWeight, EnableScoring, Query, Weight};
-use boostcore::schema::*;
-use boostcore::{Index, TantivyDocument, collector::Count};
-use boostcore_fst::Regex;
 use std::sync::Arc;
+use velocore::query::{AutomatonWeight, EnableScoring, Query, Weight};
+use velocore::schema::*;
+use velocore::{Index, TantivyDocument, collector::Count};
+use velocore_fst::Regex;
 
 #[derive(Clone)]
 struct JQ {
@@ -16,7 +16,7 @@ impl std::fmt::Debug for JQ {
     }
 }
 impl Query for JQ {
-    fn weight(&self, _s: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, _s: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         Ok(Box::new(AutomatonWeight::<Regex>::new_for_json_path(
             self.field,
             self.re.clone(),
@@ -25,7 +25,7 @@ impl Query for JQ {
     }
 }
 
-fn main() -> boostcore::Result<()> {
+fn main() -> velocore::Result<()> {
     let mut sb = Schema::builder();
     let f = sb.add_json_field(
         "_dyn",

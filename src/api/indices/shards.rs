@@ -58,7 +58,7 @@ pub async fn shard_stores(
                     i.to_string(),
                     json!({"stores": [{
                         "node-0": {
-                            "name": "boostsearch", "ephemeral_id": "_na_",
+                            "name": "velosearch", "ephemeral_id": "_na_",
                             "transport_address": "127.0.0.1:9300", "attributes": {},
                         },
                         "allocation_id": "_na_",
@@ -270,7 +270,7 @@ pub async fn indices_recovery(
                 "source": {},
                 "target": {
                     "id": "node-0", "host": "127.0.0.1", "transport_address": "127.0.0.1:9300",
-                    "ip": "127.0.0.1", "name": "boostsearch",
+                    "ip": "127.0.0.1", "name": "velosearch",
                 },
                 "index": {
                     "size": {

@@ -1,4 +1,4 @@
-//! Aggregations: the ones BoostCore parses, and the ones this engine walks
+//! Aggregations: the ones VeloCore parses, and the ones this engine walks
 //! itself a bucket at a time.
 
 mod matrix;

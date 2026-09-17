@@ -2,7 +2,7 @@
 # The bench matrix on a machine rented from GCP for the length of the run.
 #
 # Terraform in tools/cloud_bench/ makes one VM and one bucket; the VM's
-# startup script runs OpenSearch 3.1.0 and BoostSearch side by side in
+# startup script runs OpenSearch 3.1.0 and VeloSearch side by side in
 # containers, runs tools/bench_matrix.py and puts the numbers in the bucket.
 # This script waits for them, brings them back to bench/, and destroys what
 # it made -- on the way out whatever happened.
@@ -26,7 +26,7 @@ cat <<PLAN
 This would, in project $PROJECT, zone $ZONE:
 
   1. make a bucket and one $TYPE with a 200 GB SSD, from tools/cloud_bench/
-  2. on it: docker, OpenSearch 3.1.0 in a container, BoostSearch built from
+  2. on it: docker, OpenSearch 3.1.0 in a container, VeloSearch built from
      $REF
      and run in a container, a 200,000-document corpus, tools/bench_matrix.py
   3. wait for the numbers to land in the bucket, bring them back to

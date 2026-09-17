@@ -20,7 +20,7 @@ set -e
 REGION=${BENCH_REGION:-ap-southeast-1}
 TYPE=${BENCH_TYPE:-c7i.4xlarge}
 DISK=${BENCH_DISK:-200}
-NAME=${BENCH_NAME:-boostsearch-bench}
+NAME=${BENCH_NAME:-velosearch-bench}
 # c7i.4xlarge: 16 vCPU, 32 GiB, dedicated bandwidth. A search engine bench on
 # a burstable instance measures the burst credits.
 HOURLY=${BENCH_HOURLY:-0.85}
@@ -30,7 +30,7 @@ This would, in $REGION:
 
   1. start one $TYPE with a ${DISK}GB gp3 volume, named $NAME
   2. install docker on it
-  3. run OpenSearch 3.1.0 and BoostSearch side by side in containers
+  3. run OpenSearch 3.1.0 and VeloSearch side by side in containers
   4. generate the 200,000-document corpus and run tools/bench_matrix.py
   5. bring the numbers back to bench/cloud-\$(date +%F).json
   6. terminate the instance
@@ -83,8 +83,8 @@ run "dnf install -y docker git python3 && systemctl start docker"
 run "docker run -d --name os-bench -p 9201:9200 -e discovery.type=single-node \
      -e DISABLE_SECURITY_PLUGIN=true -e OPENSEARCH_JAVA_OPTS='-Xms8g -Xmx8g' \
      opensearchproject/opensearch:3.1.0"
-run "git clone --depth 1 https://github.com/codefin-lab/boostsearch /opt/bs"
-run "cd /opt/bs && docker build -t boostsearch . && docker run -d --name bs -p 9202:9200 boostsearch"
+run "git clone --depth 1 https://github.com/codefin-lab/velosearch /opt/bs"
+run "cd /opt/bs && docker build -t velosearch . && docker run -d --name bs -p 9202:9200 velosearch"
 run "cd /opt/bs && python3 tools/gen_dataset.py --out /tmp/bench_logs.ndjson"
 out=$(run "cd /opt/bs && BENCH_A=http://localhost:9201 BENCH_B=http://localhost:9202 \
      BENCH_A_CONTAINER=os-bench BENCH_OUT=/tmp/matrix.json python3 tools/bench_matrix.py; \

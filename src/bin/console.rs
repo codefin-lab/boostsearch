@@ -4,11 +4,11 @@
 //! replaces is: they are deployed apart, on different machines as often as
 //! not, and a console that has to run beside its engine is a worse console.
 //!
-//!   BOOSTSEARCH_CONSOLE_ADDR       where to listen (default 127.0.0.1:5601)
-//!   BOOSTSEARCH_CONSOLE_PATH       an OpenSearch Dashboards distribution
-//!   BOOSTSEARCH_CONSOLE_BASE_PATH  the path everything is served under
-//!   BOOSTSEARCH_ENGINE             the engine behind it
-//!   BOOSTSEARCH_CONSOLE_OVERRIDE   `key=value` pairs, comma separated: settings
+//!   VELOSEARCH_CONSOLE_ADDR       where to listen (default 127.0.0.1:5601)
+//!   VELOSEARCH_CONSOLE_PATH       an OpenSearch Dashboards distribution
+//!   VELOSEARCH_CONSOLE_BASE_PATH  the path everything is served under
+//!   VELOSEARCH_ENGINE             the engine behind it
+//!   VELOSEARCH_CONSOLE_OVERRIDE   `key=value` pairs, comma separated: settings
 //!                                  an operator fixes and no reader may change
 //!
 //! The distribution is pointed at rather than carried, the way the geoip
@@ -23,12 +23,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use boostsearch::console::Console;
-use boostsearch::console::engine::{Engine, Failed, path_segment};
-use boostsearch::console::metrics::Metrics;
-use boostsearch::console::saved::{Looking, Saved, Writing};
-use boostsearch::console::settings::Settings;
 use serde_json::Value;
+use velosearch::console::Console;
+use velosearch::console::engine::{Engine, Failed, path_segment};
+use velosearch::console::metrics::Metrics;
+use velosearch::console::saved::{Looking, Saved, Writing};
+use velosearch::console::settings::Settings;
 
 /// Everything a handler needs: what to serve, and what to serve it from.
 struct Serving {
@@ -52,24 +52,24 @@ type Shared = Arc<Serving>;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let addr =
-        std::env::var("BOOSTSEARCH_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:5601".to_string());
-    let home = std::env::var("BOOSTSEARCH_CONSOLE_PATH").unwrap_or_default();
+        std::env::var("VELOSEARCH_CONSOLE_ADDR").unwrap_or_else(|_| "127.0.0.1:5601".to_string());
+    let home = std::env::var("VELOSEARCH_CONSOLE_PATH").unwrap_or_default();
     if home.is_empty() {
         eprintln!(
-            "BOOSTSEARCH_CONSOLE_PATH is not set. It is an OpenSearch Dashboards\n\
+            "VELOSEARCH_CONSOLE_PATH is not set. It is an OpenSearch Dashboards\n\
              distribution -- the front end this serves, which is theirs rather than\n\
              ours. In a container it is /usr/share/opensearch-dashboards."
         );
         std::process::exit(2);
     }
-    let base_path = std::env::var("BOOSTSEARCH_CONSOLE_BASE_PATH").unwrap_or_default();
+    let base_path = std::env::var("VELOSEARCH_CONSOLE_BASE_PATH").unwrap_or_default();
     let base_path = base_path.trim_end_matches('/').to_string();
     let console = match Console::open(
         home.into(),
         std::path::Path::new("console"),
         base_path,
-        boostsearch::console::overrides_from(
-            &std::env::var("BOOSTSEARCH_CONSOLE_OVERRIDE").unwrap_or_default(),
+        velosearch::console::overrides_from(
+            &std::env::var("VELOSEARCH_CONSOLE_OVERRIDE").unwrap_or_default(),
         ),
     ) {
         Ok(c) => c,
@@ -79,9 +79,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let engine_url =
-        std::env::var("BOOSTSEARCH_ENGINE").unwrap_or_else(|_| "http://127.0.0.1:9200".into());
+        std::env::var("VELOSEARCH_ENGINE").unwrap_or_else(|_| "http://127.0.0.1:9200".into());
     println!(
-        "boostsearch console: OpenSearch Dashboards {} ({} bundles) on {addr}, engine {engine_url}",
+        "velosearch console: OpenSearch Dashboards {} ({} bundles) on {addr}, engine {engine_url}",
         console.pinned.version,
         console.pinned.bundles.len()
     );
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let build = console.pinned.build_number;
     let base = console.base_path.clone();
     let compression_referrers: Vec<String> =
-        std::env::var("BOOSTSEARCH_CONSOLE_COMPRESSION_REFERRERS")
+        std::env::var("VELOSEARCH_CONSOLE_COMPRESSION_REFERRERS")
             .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_string())
@@ -97,8 +97,8 @@ async fn main() -> anyhow::Result<()> {
             .collect();
     // on unless the operator turns it off, as `server.xsrf.disableProtection`
     // does in the Node server -- and its own suite needs it off
-    let xsrf = std::env::var("BOOSTSEARCH_CONSOLE_XSRF").map(|v| v != "false").unwrap_or(true);
-    let proxy_filter: Vec<regex::Regex> = std::env::var("BOOSTSEARCH_CONSOLE_PROXY_FILTER")
+    let xsrf = std::env::var("VELOSEARCH_CONSOLE_XSRF").map(|v| v != "false").unwrap_or(true);
+    let proxy_filter: Vec<regex::Regex> = std::env::var("VELOSEARCH_CONSOLE_PROXY_FILTER")
         .unwrap_or_else(|_| ".*".to_string())
         .split(',')
         .map(str::trim)
@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
         let engine = console.engine.clone();
         let mapping = console.console.pinned.saved_object_index.get("mappings").cloned();
         let found = tokio::task::spawn_blocking(move || {
-            boostsearch::console::migrate::ensure_because(
+            velosearch::console::migrate::ensure_because(
                 &engine,
                 &mapping.unwrap_or_default(),
                 "startup",
@@ -357,14 +357,14 @@ async fn status(State(serving): State<Shared>) -> Response {
         Ok(Err(e)) => ("red", format!("OpenSearch is not available: {}", e.message)),
         Err(e) => ("red", format!("the check could not be run: {e}")),
     };
-    let since = boostsearch::console::now();
+    let since = velosearch::console::now();
     let colour = |state: &str| match state {
         "green" => ("success", "secondary"),
         _ => ("alert", "danger"),
     };
     let (icon, ui_colour) = colour(state);
     axum::Json(serde_json::json!({
-        "name": "boostsearch-console",
+        "name": "velosearch-console",
         "uuid": console.uuid(),
         "version": {
             "number": console.pinned.version,
@@ -498,7 +498,7 @@ fn accepts(headers: &HeaderMap) -> &str {
     headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("")
 }
 
-fn served(found: Option<boostsearch::console::assets::Served>, cache: &str) -> Response {
+fn served(found: Option<velosearch::console::assets::Served>, cache: &str) -> Response {
     let Some(found) = found else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
@@ -522,7 +522,7 @@ async fn migrate_now(State(serving): State<Shared>) -> Response {
     let engine = serving.engine.clone();
     let mapping = serving.console.pinned.saved_object_index.get("mappings").cloned();
     let found = tokio::task::spawn_blocking(move || {
-        boostsearch::console::migrate::ensure_because(
+        velosearch::console::migrate::ensure_because(
             &engine,
             &mapping.unwrap_or_default(),
             "the migrate route",
@@ -737,7 +737,7 @@ async fn find(
         });
     }
     if let Some(filter) = looking.filter.take() {
-        match boostsearch::console::filter::parse(&filter, &looking.types) {
+        match velosearch::console::filter::parse(&filter, &looking.types) {
             Ok(query) => looking.filter_query = Some(query),
             Err(message) => {
                 return refused(Failed {
@@ -781,8 +781,8 @@ fn looking_from(query: &str) -> Looking {
     looking
 }
 
-fn management_of(serving: &Serving) -> boostsearch::console::management::Management<'_> {
-    boostsearch::console::management::Management {
+fn management_of(serving: &Serving) -> velosearch::console::management::Management<'_> {
+    velosearch::console::management::Management {
         saved: saved_of(serving),
         engine: &serving.engine,
         meta: &serving.console.pinned.management_meta,
@@ -811,7 +811,7 @@ async fn export(State(serving): State<Shared>, body: String) -> Response {
     let include = body.get("includeReferencesDeep").and_then(|v| v.as_bool()).unwrap_or(false);
     let exclude = body.get("excludeExportDetails").and_then(|v| v.as_bool()).unwrap_or(false);
     let found = tokio::task::spawn_blocking(move || {
-        boostsearch::console::management::export(
+        velosearch::console::management::export(
             &management_of(&serving),
             &types,
             &objects,
@@ -875,7 +875,7 @@ async fn import(
         });
     };
     on_engine(serving, move |s| {
-        boostsearch::console::management::import(&management_of(s), &lines, overwrite, None)
+        velosearch::console::management::import(&management_of(s), &lines, overwrite, None)
     })
     .await
 }
@@ -914,7 +914,7 @@ async fn resolve_import_errors(
     };
     let retries = retries_of(&body);
     on_engine(serving, move |s| {
-        boostsearch::console::management::import(&management_of(s), &lines, false, Some(&retries))
+        velosearch::console::management::import(&management_of(s), &lines, false, Some(&retries))
     })
     .await
 }
@@ -961,8 +961,8 @@ fn file_part(body: &str) -> Option<String> {
 /// What the reader said to do about each conflict, by type and id.
 fn retries_of(
     body: &str,
-) -> std::collections::BTreeMap<(String, String), boostsearch::console::management::Retry> {
-    use boostsearch::console::management::Retry;
+) -> std::collections::BTreeMap<(String, String), velosearch::console::management::Retry> {
+    use velosearch::console::management::Retry;
     let raw = form_parts(body)
         .into_iter()
         .find(|(name, _)| name == "retries")
@@ -1020,7 +1020,7 @@ async fn scroll_counts(State(serving): State<Shared>, body: axum::Json<Value>) -
 async fn scroll_export(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
     let types = listed(body.get("typesToInclude"));
     on_engine(serving, move |s| {
-        boostsearch::console::management::scroll_export(&saved_of(s), &types)
+        velosearch::console::management::scroll_export(&saved_of(s), &types)
     })
     .await
 }
@@ -1142,7 +1142,7 @@ async fn fields_for_wildcard(
         Err(response) => return *response,
     };
     on_engine(serving, move |s| {
-        boostsearch::console::fields::for_wildcard(&s.engine, &pattern, &meta_fields)
+        velosearch::console::fields::for_wildcard(&s.engine, &pattern, &meta_fields)
             .map(|fields| serde_json::json!({"fields": fields}))
             .map_err(not_found_for_fields)
     })
@@ -1199,7 +1199,7 @@ async fn fields_for_time_pattern(
         Err(response) => return *response,
     };
     on_engine(serving, move |s| {
-        boostsearch::console::fields::for_time_pattern(&s.engine, &pattern, look_back, &meta_fields)
+        velosearch::console::fields::for_time_pattern(&s.engine, &pattern, look_back, &meta_fields)
             .map(|fields| serde_json::json!({"fields": fields}))
             .map_err(|_| Failed::of(404, "Not Found"))
     })
@@ -1208,7 +1208,7 @@ async fn fields_for_time_pattern(
 
 async fn msearch(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
     let body = body.0;
-    on_engine(serving, move |s| boostsearch::console::search::msearch(&s.engine, &body)).await
+    on_engine(serving, move |s| velosearch::console::search::msearch(&s.engine, &body)).await
 }
 
 async fn search_strategy(
@@ -1225,7 +1225,7 @@ async fn search_strategy(
         return refused(Failed::of(404, format!("Search strategy {strategy} not found")));
     }
     let body = body.0;
-    on_engine(serving, move |s| boostsearch::console::search::search(&s.engine, &body)).await
+    on_engine(serving, move |s| velosearch::console::search::search(&s.engine, &body)).await
 }
 
 /// A search that cannot be cancelled -- the engine answers each in one
@@ -1254,7 +1254,7 @@ async fn suggestions(
     };
     let bool_filter = body.get("boolFilter").cloned();
     on_engine(serving, move |s| {
-        boostsearch::console::search::suggestions(
+        velosearch::console::search::suggestions(
             &s.engine,
             &saved_of(s),
             &index,
@@ -1278,7 +1278,7 @@ async fn shorten_url(State(serving): State<Shared>, body: axum::Json<Value>) -> 
         ));
     };
     on_engine(serving, move |s| {
-        boostsearch::console::urls::shorten(&saved_of(s), &url)
+        velosearch::console::urls::shorten(&saved_of(s), &url)
             .map(|id| serde_json::json!({"urlId": id}))
     })
     .await
@@ -1286,7 +1286,7 @@ async fn shorten_url(State(serving): State<Shared>, body: axum::Json<Value>) -> 
 
 async fn short_url(State(serving): State<Shared>, Path(id): Path<String>) -> Response {
     on_engine(serving, move |s| {
-        boostsearch::console::urls::resolve(&saved_of(s), &id)
+        velosearch::console::urls::resolve(&saved_of(s), &id)
             .map(|url| serde_json::json!({"url": url}))
     })
     .await
@@ -1299,7 +1299,7 @@ async fn goto(State(serving): State<Shared>, Path(id): Path<String>) -> Response
     let resolved = tokio::task::spawn_blocking({
         let serving = serving.clone();
         move || {
-            let url = boostsearch::console::urls::resolve(&saved_of(&serving), &id)?;
+            let url = velosearch::console::urls::resolve(&saved_of(&serving), &id)?;
             let in_session = settings_of(&serving)
                 .read()
                 .ok()
@@ -1570,7 +1570,7 @@ async fn dql_opt_in_stats(State(serving): State<Shared>, body: axum::Json<Value>
             format!("[request body.opt_in]: expected value of type [boolean] but got [{got}]"),
         ));
     };
-    on_engine(serving, move |s| boostsearch::console::usage::dql_opt_in(&saved_of(s), opt_in)).await
+    on_engine(serving, move |s| velosearch::console::usage::dql_opt_in(&saved_of(s), opt_in)).await
 }
 
 async fn ui_metric_report(State(serving): State<Shared>, body: axum::Json<Value>) -> Response {
@@ -1581,7 +1581,7 @@ async fn ui_metric_report(State(serving): State<Shared>, body: axum::Json<Value>
         ));
     };
     on_engine(serving, move |s| {
-        match boostsearch::console::usage::store_report(&saved_of(s), &report) {
+        match velosearch::console::usage::store_report(&saved_of(s), &report) {
             Ok(()) => Ok(serde_json::json!({"status": "ok"})),
             Err(e) if e.status == 400 => Err(e),
             // a report that could not be kept is not the page's problem
@@ -1631,8 +1631,8 @@ async fn stats(
                 "opensearchDashboards".into(),
                 serde_json::json!({
                     "uuid": s.console.uuid(),
-                    "name": "boostsearch-console",
-                    "index": boostsearch::console::engine::INDEX,
+                    "name": "velosearch-console",
+                    "index": velosearch::console::engine::INDEX,
                     "host": host,
                     "locale": "en",
                     "transport_address": format!("{host}:{port}"),
@@ -1642,7 +1642,7 @@ async fn stats(
                 }),
             );
         }
-        let mut out = boostsearch::console::usage::api_field_names(metrics);
+        let mut out = velosearch::console::usage::api_field_names(metrics);
         if extended {
             let cluster_uuid = reachable
                 .ok()
@@ -1650,7 +1650,7 @@ async fn stats(
                 .unwrap_or(Value::Null);
             let usage = match exclude_usage {
                 true => serde_json::json!({}),
-                false => boostsearch::console::usage::usage(&saved_of(s)),
+                false => velosearch::console::usage::usage(&saved_of(s)),
             };
             if legacy {
                 // the old shape: the server's own usage spread at the top,
@@ -1670,7 +1670,7 @@ async fn stats(
                 out["usage"] = Value::Object(flat);
                 out["clusterUuid"] = cluster_uuid;
             } else {
-                out["usage"] = boostsearch::console::usage::api_field_names(usage);
+                out["usage"] = velosearch::console::usage::api_field_names(usage);
                 out["cluster_uuid"] = cluster_uuid;
             }
         }
@@ -1681,7 +1681,7 @@ async fn stats(
 
 async fn sample_data_list(State(serving): State<Shared>) -> Response {
     on_engine(serving, move |s| {
-        Ok(Value::Array(boostsearch::console::sample_data::list(
+        Ok(Value::Array(velosearch::console::sample_data::list(
             &s.engine,
             &saved_of(s),
             &s.console.sample_data,
@@ -1702,7 +1702,7 @@ async fn sample_data_install(
     let now = query_pairs(query).into_iter().find(|(k, _)| k == "now").map(|(_, v)| v);
     on_engine(serving, move |s| {
         let Some(set) = sample_set(s, &id) else { return Err(Failed::of(404, "Not Found")) };
-        boostsearch::console::sample_data::install(
+        velosearch::console::sample_data::install(
             &s.engine,
             &saved_of(s),
             &s.console.home,
@@ -1720,7 +1720,7 @@ async fn sample_data_uninstall(State(serving): State<Shared>, Path(id): Path<Str
             let Some(set) = sample_set(&serving, &id) else {
                 return Err(Failed::of(404, "Not Found"));
             };
-            boostsearch::console::sample_data::uninstall(&serving.engine, &saved_of(&serving), set)
+            velosearch::console::sample_data::uninstall(&serving.engine, &saved_of(&serving), set)
         }
     })
     .await;
@@ -1738,7 +1738,7 @@ async fn ism_indices(
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Response {
     let pairs = query_pairs(query);
-    on_engine(serving, move |s| Ok(boostsearch::console::ism::indices(&s.engine, &pairs))).await
+    on_engine(serving, move |s| Ok(velosearch::console::ism::indices(&s.engine, &pairs))).await
 }
 
 async fn ism_data_streams(
@@ -1747,7 +1747,7 @@ async fn ism_data_streams(
 ) -> Response {
     let search = query_pairs(query).into_iter().find(|(k, _)| k == "search").map(|(_, v)| v);
     on_engine(serving, move |s| {
-        Ok(boostsearch::console::ism::data_streams(&s.engine, search.as_deref()))
+        Ok(velosearch::console::ism::data_streams(&s.engine, search.as_deref()))
     })
     .await
 }
@@ -1780,7 +1780,7 @@ async fn ism_api_caller(
         }
         let filter = s.proxy_filter.clone();
         let allowed = move |path: &str| filter.iter().any(|re| re.is_match(path));
-        Ok(boostsearch::console::ism::api_caller(&s.engine, &endpoint, &data, &allowed))
+        Ok(velosearch::console::ism::api_caller(&s.engine, &endpoint, &data, &allowed))
     })
     .await
 }
@@ -1789,7 +1789,7 @@ async fn ism_api_caller(
 
 /// The engine's answer carried back as the pages' search routes carry
 /// theirs: the body on success, `{message, attributes: {error}}` otherwise.
-fn carried(answer: boostsearch::console::engine::Answer) -> Result<Value, Failed> {
+fn carried(answer: velosearch::console::engine::Answer) -> Result<Value, Failed> {
     let found: Value = serde_json::from_slice(&answer.body)
         .map_err(|e| Failed::of(502, format!("the engine's answer could not be read: {e}")))?;
     if answer.status >= 300 {

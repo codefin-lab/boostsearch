@@ -49,8 +49,8 @@ The longer form. The node needs nothing special: the `attachment` processor is
 built in.
 
 ```bash
-./target/release/boostsearch &
-BS=http://127.0.0.1:9200 examples/23-document-library/run.sh
+./target/release/velosearch &
+VS=http://127.0.0.1:9200 examples/23-document-library/run.sh
 ```
 
 ## What to look for

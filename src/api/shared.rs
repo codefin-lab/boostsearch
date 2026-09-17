@@ -22,7 +22,7 @@ pub fn stack_trace_for(kind: &str, reason: &str, at: &str) -> String {
         .collect();
     // the reason names the resource, and the class name follows it, which is
     // the order the older Java form put them in
-    format!("{reason} -- {class} at boostsearch::api::{at} (src/api.rs)")
+    format!("{reason} -- {class} at velosearch::api::{at} (src/api.rs)")
 }
 
 /// Attach a trace to an error a caller asked to see the inside of.
@@ -635,12 +635,12 @@ pub(crate) fn entry_of<'a>(
 
 /// Where this node listens, as it reports itself.
 pub fn bound_address() -> String {
-    std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string())
+    std::env::var("VELOSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".to_string())
 }
 
 /// The largest body this node accepts, in bytes.
 pub fn max_content_bytes() -> u64 {
-    std::env::var("BOOSTSEARCH_MAX_CONTENT_MB")
+    std::env::var("VELOSEARCH_MAX_CONTENT_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(100)

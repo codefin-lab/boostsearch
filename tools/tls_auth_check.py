@@ -43,10 +43,10 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CERTS = ROOT / "study/security/bwc-test/src/test/resources/security"
-PORT = int(os.environ.get("BOOST_TLS_PORT", "9374"))
-TRANSPORT = int(os.environ.get("BOOST_TLS_TRANSPORT", "9474"))
-OPEN_PORT = int(os.environ.get("BOOST_TLS_OPEN_PORT", "9372"))
-OPEN_TRANSPORT = int(os.environ.get("BOOST_TLS_OPEN_TRANSPORT", "9472"))
+PORT = int(os.environ.get("VELO_TLS_PORT", "9374"))
+TRANSPORT = int(os.environ.get("VELO_TLS_TRANSPORT", "9474"))
+OPEN_PORT = int(os.environ.get("VELO_TLS_OPEN_PORT", "9372"))
+OPEN_TRANSPORT = int(os.environ.get("VELO_TLS_OPEN_TRANSPORT", "9472"))
 PROBE = "/_plugins/_security/health"
 ADMIN = ("admin", "admin")
 
@@ -88,14 +88,14 @@ def ask(path, method="GET", body=None, creds=None, ctx=None, host="localhost",
 
 class Node:
     def __init__(self, data, addr, transport, config=None, extra=None, log=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("BOOSTSEARCH_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VELOSEARCH_")}
         env.update({
-            "BOOSTSEARCH_ADDR": addr,
-            "BOOSTSEARCH_DATA": str(data),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(transport),
+            "VELOSEARCH_ADDR": addr,
+            "VELOSEARCH_DATA": str(data),
+            "VELOSEARCH_TRANSPORT_PORT": str(transport),
         })
         if config:
-            env["BOOSTSEARCH_CONFIG"] = str(config)
+            env["VELOSEARCH_CONFIG"] = str(config)
         env.update(extra or {})
         self.log_path = log
         self.log = open(log, "ab")
@@ -141,7 +141,7 @@ class Node:
         self.log.close()
 
 
-BINARY = str(ROOT / "target/release/boostsearch")
+BINARY = str(ROOT / "target/release/velosearch")
 
 
 def main():
@@ -163,7 +163,7 @@ def main():
     work = pathlib.Path(tempfile.mkdtemp(prefix="bstls."))
     config = work / "config"
     (config / "security").mkdir(parents=True)
-    (config / "boostsearch.yml").write_text(
+    (config / "velosearch.yml").write_text(
         "plugins.security.ssl.http.enabled: true\n"
         f"plugins.security.ssl.http.pemcert_filepath: {CERTS / 'esnode.pem'}\n"
         f"plugins.security.ssl.http.pemkey_filepath: {CERTS / 'esnode-key.pem'}\n"
@@ -173,9 +173,9 @@ def main():
     open_node = None
     try:
         node = Node(work / "data", f"127.0.0.1:{PORT}", TRANSPORT, config=config,
-                    extra={"BOOSTSEARCH_DISABLED": "false",
-                           "BOOSTSEARCH_TRANSPORT_INSECURE": "true",
-                           "BOOSTSEARCH_RESTAPI_ROLES_ENABLED": "all_access"},
+                    extra={"VELOSEARCH_DISABLED": "false",
+                           "VELOSEARCH_TRANSPORT_INSECURE": "true",
+                           "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access"},
                     log=work / "tls-node.log")
         if not node.wait_https():
             check("the node starts with TLS and security on", False, node.tail())
@@ -245,7 +245,7 @@ def main():
         # what the image says of itself: published to everyone, with neither
         # security configured nor security switched off, it does not start
         open_node = Node(work / "open", f"0.0.0.0:{OPEN_PORT}", OPEN_TRANSPORT,
-                         extra={"BOOSTSEARCH_TRANSPORT_INSECURE": "true"},
+                         extra={"VELOSEARCH_TRANSPORT_INSECURE": "true"},
                          log=work / "open-node.log")
         gone = open_node.wait_exit(20)
         answered = open_node.listening(OPEN_PORT)

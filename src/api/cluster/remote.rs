@@ -95,11 +95,11 @@ pub fn remotes(store: &Store) -> std::collections::BTreeMap<String, Remote> {
 
 /// How many connections a sniffing remote keeps: three, as OpenSearch keeps,
 /// unless the node was started with `cluster.remote.connections_per_cluster`
-/// (or `BOOSTSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER`). It used to be one --
+/// (or `VELOSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER`). It used to be one --
 /// the number OpenSearch's own cross-cluster suite configures its test
 /// cluster with, which is not the number anyone else gets.
 fn default_connections() -> u32 {
-    std::env::var("BOOSTSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER")
+    std::env::var("VELOSEARCH_REMOTE_CONNECTIONS_PER_CLUSTER")
         .ok()
         .or_else(|| {
             crate::tls::node_settings()
@@ -117,11 +117,11 @@ fn split_key(key: &str) -> Option<(String, String)> {
     (!name.contains('.')).then(|| (name.to_string(), leaf.to_string()))
 }
 
-/// What the node was started with: `BOOSTSEARCH_CLUSTER_REMOTE=<name>:<host:port>`,
-/// several separated by commas, and the same keys in `boostsearch.yml`.
+/// What the node was started with: `VELOSEARCH_CLUSTER_REMOTE=<name>:<host:port>`,
+/// several separated by commas, and the same keys in `velosearch.yml`.
 pub fn configured_defaults() -> Vec<(String, Value)> {
     let mut out = Vec::new();
-    if let Ok(list) = std::env::var("BOOSTSEARCH_CLUSTER_REMOTE") {
+    if let Ok(list) = std::env::var("VELOSEARCH_CLUSTER_REMOTE") {
         for one in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             if let Some((name, address)) = one.split_once(':') {
                 out.push((

@@ -25,7 +25,7 @@ fn collect_rank_features(node: &Value, out: &mut Vec<Value>) {
 /// link to it, how short its address is -- and the curve says how quickly that
 /// worth stops mattering.
 fn rescore_by_rank_features(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
+    searchers: &[(String, velocore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut [Cand],
     features: &[Value],
 ) {
@@ -183,11 +183,11 @@ pub(crate) fn search_shard_failure(kind: &str, reason: &str, index: &str) -> Res
 /// document sits in: how often a term appears in this document, in how many
 /// documents, and how many tokens the field holds in all.
 fn term_stats_for(
-    searcher: &boostcore::Searcher,
+    searcher: &velocore::Searcher,
     st: &IdxState,
     addr: DocAddress,
 ) -> crate::painless::contexts::TermStats {
-    use boostcore::schema::IndexRecordOption;
+    use velocore::schema::IndexRecordOption;
     let reader = searcher.segment_reader(addr.segment_ord).clone();
     let fields = st.fields;
     let mapping = st.mapping.clone();
@@ -201,7 +201,7 @@ fn term_stats_for(
         } else {
             (fields.raw, term.to_string())
         };
-        let mut t = boostcore::schema::Term::from_field_json_path(f, field, true);
+        let mut t = velocore::schema::Term::from_field_json_path(f, field, true);
         t.append_type_and_str(&text);
         let Ok(inverted) = reader.inverted_index(f) else { return 0.0 };
         match what {
@@ -210,7 +210,7 @@ fn term_stats_for(
                 .ok()
                 .flatten()
                 .map(|mut postings| {
-                    use boostcore::{DocSet, postings::Postings};
+                    use velocore::{DocSet, postings::Postings};
                     if postings.seek(doc) == doc { postings.term_freq() as f64 } else { 0.0 }
                 })
                 .unwrap_or(0.0),
@@ -220,10 +220,10 @@ fn term_stats_for(
                 .ok()
                 .flatten()
                 .map(|mut postings| {
-                    use boostcore::{DocSet, postings::Postings};
+                    use velocore::{DocSet, postings::Postings};
                     let mut total = 0.0;
                     let mut d = postings.doc();
-                    while d != boostcore::TERMINATED {
+                    while d != velocore::TERMINATED {
                         total += postings.term_freq() as f64;
                         d = postings.advance();
                     }
@@ -233,7 +233,7 @@ fn term_stats_for(
             // the field's terms sit together in the dictionary, under the
             // path they share; each one's postings say how often it appears
             "sumTotalTermFreq" | "sumDocFreq" => {
-                let prefix = boostcore::schema::Term::from_field_json_path(f, field, true);
+                let prefix = velocore::schema::Term::from_field_json_path(f, field, true);
                 let low = prefix.serialized_value_bytes().to_vec();
                 let mut high = low.clone();
                 high.push(0xff);
@@ -251,9 +251,9 @@ fn term_stats_for(
                     if let Ok(mut postings) =
                         inverted.read_postings_from_terminfo(&info, IndexRecordOption::WithFreqs)
                     {
-                        use boostcore::{DocSet, postings::Postings};
+                        use velocore::{DocSet, postings::Postings};
                         let mut d = postings.doc();
-                        while d != boostcore::TERMINATED {
+                        while d != velocore::TERMINATED {
                             total += postings.term_freq() as f64;
                             d = postings.advance();
                         }
@@ -269,7 +269,7 @@ fn term_stats_for(
 /// `script_score`: the score is what the script says, given the query's
 /// score and the document.
 fn rescore_by_script(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
+    searchers: &[(String, velocore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut Vec<Cand>,
     spec: &Value,
 ) -> std::result::Result<(), Response> {
@@ -322,7 +322,7 @@ fn rescore_by_script(
 }
 
 fn rescore_by_functions(
-    searchers: &[(String, boostcore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
+    searchers: &[(String, velocore::Searcher, std::sync::Arc<crate::store::IdxLock>)],
     cands: &mut [Cand],
     spec: &Value,
 ) -> std::result::Result<(), Response> {
@@ -603,7 +603,7 @@ pub fn every_matching_source(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "query_shard_exception", e.to_string()))?;
         // asked how many before they are collected: refusing once the set is
         // in memory is refusing after the harm is done
-        let how_many = searcher.search(&q, &boostcore::collector::Count).map_err(|e| {
+        let how_many = searcher.search(&q, &velocore::collector::Count).map_err(|e| {
             err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
         })?;
         if out.len() + how_many > ceiling {
@@ -616,7 +616,7 @@ pub fn every_matching_source(
                 ),
             ));
         }
-        let found = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+        let found = searcher.search(&q, &velocore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
         })?;
         if out.len() + found.len() > ceiling {
@@ -1635,7 +1635,7 @@ pub fn run(
         // page kept only the ids in that: past ten thousand matches, hits
         // that do match were dropped and `hits.total` was wrong -- badly so
         // when the page was sorted by something other than score.
-        let mut keep: Vec<std::collections::HashSet<boostcore::DocAddress>> = Vec::new();
+        let mut keep: Vec<std::collections::HashSet<velocore::DocAddress>> = Vec::new();
         for (_, searcher, st) in searchers.iter() {
             let g = st.read();
             let ctx = crate::query::Ctx {
@@ -1657,7 +1657,7 @@ pub fn run(
             // how many it matches is asked before the set of them is built:
             // collecting first and refusing afterwards is refusing after the
             // memory has already been taken
-            let how_many = searcher.search(&q, &boostcore::collector::Count).map_err(|e| {
+            let how_many = searcher.search(&q, &velocore::collector::Count).map_err(|e| {
                 err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
             })?;
             if how_many > MOST_POST_FILTERED {
@@ -1673,7 +1673,7 @@ pub fn run(
             }
             // a search that failed is not a search that matched nothing
             let found =
-                searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+                searcher.search(&q, &velocore::collector::DocSetCollector).map_err(|e| {
                     err(StatusCode::INTERNAL_SERVER_ERROR, "search_exception", e.to_string())
                 })?;
             keep.push(found);

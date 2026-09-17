@@ -17,7 +17,7 @@ impl Store {
     ) -> String {
         self.sweep_contexts();
         let keep = keep_alive_ms;
-        let id = format!("boostsearch-scroll-{}", random_token());
+        let id = format!("velosearch-scroll-{}", random_token());
         // the point in time is opened before the scrolls are locked: opening
         // one sweeps the contexts that have run out, and that reads them
         let pit = self.open_pit(expr, keep);

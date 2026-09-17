@@ -38,7 +38,7 @@ pub(crate) fn nested_inner_hits(
     kept: bool,
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
-    index: &boostcore::Index,
+    index: &velocore::Index,
     analysis: &crate::analysis::Registry,
 ) -> serde_json::Map<String, Value> {
     let mut groups = serde_json::Map::new();

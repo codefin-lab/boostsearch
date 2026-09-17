@@ -103,14 +103,14 @@ pub(crate) fn parse_sort(spec: Option<&Value>) -> Vec<SortKey> {
 }
 
 /// Decode one raw columnar u64 into the value its column type really holds.
-pub(crate) fn decode_col_value(raw: u64, ty: boostcore::columnar::ColumnType) -> Option<SortValue> {
-    use boostcore::columnar::ColumnType;
+pub(crate) fn decode_col_value(raw: u64, ty: velocore::columnar::ColumnType) -> Option<SortValue> {
+    use velocore::columnar::ColumnType;
     match ty {
         ColumnType::I64 | ColumnType::DateTime => {
-            Some(SortValue::I64(boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw)))
+            Some(SortValue::I64(velocore::columnar::MonotonicallyMappableToU64::from_u64(raw)))
         }
         ColumnType::F64 => Some(SortValue::F64(
-            <f64 as boostcore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
+            <f64 as velocore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
         )),
         ColumnType::U64 => Some(SortValue::U64(raw)),
         ColumnType::Bool => Some(SortValue::I64(raw as i64)),
@@ -285,10 +285,8 @@ pub(crate) fn fill_seq(
     cands: &mut [Cand],
     searchers: &[(String, Searcher, std::sync::Arc<crate::store::IdxLock>)],
 ) {
-    let mut cols: std::collections::HashMap<
-        (usize, u32),
-        Option<boostcore::columnar::Column<u64>>,
-    > = std::collections::HashMap::new();
+    let mut cols: std::collections::HashMap<(usize, u32), Option<velocore::columnar::Column<u64>>> =
+        std::collections::HashMap::new();
     for c in cands.iter_mut() {
         let (shard, seg) = (c.shard, c.addr.segment_ord);
         let col = cols.entry((shard, seg)).or_insert_with(|| {

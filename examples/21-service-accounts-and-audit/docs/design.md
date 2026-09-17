@@ -92,7 +92,7 @@ service credential this example can show.
 
 ### Where it goes
 
-`plugins.security.audit.type` -- `BOOSTSEARCH_AUDIT_TYPE` in the environment --
+`plugins.security.audit.type` -- `VELOSEARCH_AUDIT_TYPE` in the environment --
 chooses the sink:
 
 | Type | Where |

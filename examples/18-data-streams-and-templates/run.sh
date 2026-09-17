@@ -9,7 +9,7 @@ EDGE=metrics-edge-cpu
 # the checks in lib.sh count documents, and a deleted index has none to count
 expect_status() {
   local got
-  got=$(curl -s -o /dev/null -w '%{http_code}' ${AUTH:+-u "$AUTH"} "$BS$2")
+  got=$(curl -s -o /dev/null -w '%{http_code}' ${AUTH:+-u "$AUTH"} "$VS$2")
   if [ "$got" = "$1" ]; then
     printf '   \033[32mok\033[0m  GET %s answers %s%s\n' "$2" "$got" "${3:+ -- $3}"
   else
@@ -23,7 +23,7 @@ expect_status() {
 # a slash-separated path, must be exactly this
 expect_field() {
   local got
-  got=$("${CURL[@]}" "$BS$1" 2>/dev/null | python3 -c 'import json,sys
+  got=$("${CURL[@]}" "$VS$1" 2>/dev/null | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 try:
     for k in sys.argv[1].strip("/").split("/"): d = d[int(k)] if isinstance(d, list) else d[k]

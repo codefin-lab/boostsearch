@@ -227,7 +227,7 @@ repository-url / smoke-test-ingest about 30 (Phase 4), and the plugins
 ## What went into Phase 2
 
 - **BM25 as Lucene computes it** -- statistics per path of a JSON field
-  (BoostCore writes docs and tokens per path), `(k1+1)` taken out of the
+  (VeloCore writes docs and tokens per path), `(k1+1)` taken out of the
   numerator, span queries weighted once (one idf over all the terms)
 - **The token graph** -- tokens carry `positionLength`; `synonym_graph` lays
   paths out as Lucene does, `flatten_graph` flattens them, phrase / match /
@@ -293,7 +293,7 @@ Next in Phase 3: aggregation scripts (`terms` with `script`/`_value`,
 scripted_metric, bucket_script/selector, moving_fn), sort by script,
 update_by_query/reindex scripts, derived fields, intervals script filter,
 analysis-common script filters. The terms aggregation is answered by
-BoostCore's own engine, so a script-sourced one needs a source-reading path
+VeloCore's own engine, so a script-sourced one needs a source-reading path
 beside it.
 
 ### Phase 3 closed (2026-09-02)
@@ -317,7 +317,7 @@ beside it.
   constructors and DateTimeFormatter names.
 - 3.5 lang-painless: 143/143 (1 skipped).
 - Along the way: the standard tokenizer keeps `example.com` and `x:y`
-  whole (BoostCore e3be811); `match` on a date, number, boolean or ip is
+  whole (VeloCore e3be811); `match` on a date, number, boolean or ip is
   the value itself with a score of one; auto_date_histogram steps below a
   day and honours `format`; a `keyword` field under an object is a field of
   its own in aggregations.
@@ -395,13 +395,13 @@ Kept as known gaps, each needing more than it is worth:
 
 Ground truth is the security plugin at tag 3.1.0.0 (`study/security`) and a
 reference container running it (`os-secure`, https 9399). Security is off
-until `plugins.security.disabled: false` (or `BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=false`),
+until `plugins.security.disabled: false` (or `VELOSEARCH_PLUGINS_SECURITY_DISABLED=false`),
 so every gate that came before runs unchanged.
 
 ### 5.1 TLS (done)
 
 - `src/tls.rs`: rustls over the same axum router; `plugins.security.ssl.http.*`
-  from `config/boostsearch.yml` or `BOOSTSEARCH_SSL_HTTP_*`; a self-signed
+  from `config/velosearch.yml` or `VELOSEARCH_SSL_HTTP_*`; a self-signed
   certificate is written to `config/certs/` when none is given; client
   certificates are accepted when a trust store is named.
 - `_plugins/_security/api/ssl/certs` describes the node's certificates; as
@@ -531,10 +531,10 @@ reported only when a pipeline ran, and a bulk item refused sets `errors`.
 ### Performance with security on (after 5.1–5.3)
 
 Measured with `tools/bench_matrix.py` (now taking `BENCH_A`, `BENCH_B` and
-`BENCH_AUTH`): BoostSearch with security on and basic auth on every request,
+`BENCH_AUTH`): VeloSearch with security on and basic auth on every request,
 against OpenSearch 3.1.0 with no security plugin at all.
 
-| dimension | OpenSearch (plain) | BoostSearch (security, HTTP) | BoostSearch (security, HTTPS) |
+| dimension | OpenSearch (plain) | VeloSearch (security, HTTP) | VeloSearch (security, HTTPS) |
 |---|---|---|---|
 | index docs/s | 67,237 / 66,882 | 67,448 | 67,295 |
 | memory | 1.65 GiB | 380 MiB | 365 MiB |
@@ -555,7 +555,7 @@ were within noise of the HTTP run's).
 
 Gates after this work (security off, default): phase1 398/398 (release
 build), modules 820/895 as before. A debug build trips a `debug_assert` in
-BoostCore's `EmptyScorer::seek` during an explain of a cross-fields query;
+VeloCore's `EmptyScorer::seek` during an explain of a cross-fields query;
 release builds are unaffected, and the fix belongs in the fork (filed).
 
 ### Performance with security on (after 5.4–5.5)
@@ -567,7 +567,7 @@ bench opens a connection per request, so both sides pay a TLS handshake
 each time, and the reference is the container running the security
 plugin (`os-secure`).
 
-| dimension | OpenSearch plain | BoostSearch security, HTTP | OpenSearch security plugin, HTTPS | BoostSearch security, HTTPS |
+| dimension | OpenSearch plain | VeloSearch security, HTTP | OpenSearch security plugin, HTTPS | VeloSearch security, HTTPS |
 |---|---|---|---|---|
 | index docs/s | 65,063 | 66,267 | 55,355 | 65,058 |
 | memory | 1.69 GiB | 370 MiB | 1.54 GiB | 364 MiB |
@@ -592,16 +592,16 @@ unchanged.
 ### Performance tuning after the security work (2026-09-03)
 
 Asked to make every dimension a sure win, including the strictest pass
-(BoostSearch with security and TLS against OpenSearch with neither).
+(VeloSearch with security and TLS against OpenSearch with neither).
 
 What was measured first, with the bench's own client (a new connection per
 request, 200 samples, warm-up dropped):
 
 | path | p50 per request |
 |---|---|
-| BoostSearch HTTP, security off | 0.277 ms |
-| BoostSearch HTTP, security on | 0.296 ms |
-| BoostSearch HTTPS, security on | 0.684 ms |
+| VeloSearch HTTP, security off | 0.277 ms |
+| VeloSearch HTTP, security on | 0.296 ms |
+| VeloSearch HTTPS, security on | 0.684 ms |
 | OpenSearch HTTP, no plugin | 0.808 ms |
 | OpenSearch HTTPS, security plugin | 3.170 ms |
 
@@ -624,7 +624,7 @@ Done:
 
 Three quiet passes, nothing else running:
 
-| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+| dimension | pass 1: OS plain HTTP / VS security HTTP | pass 2: OS plain HTTP / VS security HTTPS | pass 3: OS plugin HTTPS / VS security HTTPS |
 |---|---|---|---|
 | index docs/s | 59,937 / 61,663 | 61,305 / 66,496 | 57,160 / 66,462 |
 | memory | 1.71 GiB / 392 MiB | 1.72 GiB / 340 MiB | 1.60 GiB / 387 MiB |
@@ -723,9 +723,9 @@ and the indexing threads spending their time in `fcntl` and `write`: on
 macOS, Rust's `File::sync_data`/`sync_all` are `fcntl(F_FULLFSYNC)`, a
 flush of the drive's own cache that costs many times an `fsync`, while
 Java's `FileChannel.force` (Lucene's `IOUtils.fsync`, the translog's
-sync) is the plain `fsync`. So every segment file BoostCore closed, every
+sync) is the plain `fsync`. So every segment file VeloCore closed, every
 `meta.json` it wrote, every directory sync and every translog sync paid a
-dearer call than OpenSearch pays on the same machine. BoostCore
+dearer call than OpenSearch pays on the same machine. VeloCore
 (`08e39fc`) and the translog now use `fsync` on macOS, `sync_data`
 elsewhere, where the two are the same call. The writer's thread count and
 memory budget were also tried at 4 threads / 128 MB and were worse (more
@@ -733,7 +733,7 @@ merging on this machine); the defaults of 2 / 64 MB stay.
 
 Three quiet passes after the fsync change, security on, 150 samples each:
 
-| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+| dimension | pass 1: OS plain HTTP / VS security HTTP | pass 2: OS plain HTTP / VS security HTTPS | pass 3: OS plugin HTTPS / VS security HTTPS |
 |---|---|---|---|
 | index docs/s | 68,002 / **99,986** | 67,500 / **98,500** | 56,149 / **96,173** |
 | memory | 1.78 GiB / 378 MiB | 1.79 GiB / 359 MiB | 1.86 GiB / 364 MiB |
@@ -751,7 +751,7 @@ Three quiet passes after the fsync change, security on, 150 samples each:
 Passes 1 and 3, the matrix the plan defines (same transport) and the
 like-for-like secure comparison, win every one of the twelve dimensions,
 indexing now by 1.5x to 1.7x. Pass 2 is a transport mismatch: the bench
-opens a connection per request, so BoostSearch pays a TLS handshake on
+opens a connection per request, so VeloSearch pays a TLS handshake on
 every call (about 0.4 ms, of which the server's own share is 120 us) and
 OpenSearch pays none. On the cheapest queries that handshake is larger
 than the server-side lead, and across three runs the last four or five
@@ -815,7 +815,7 @@ refusal), and cloning the whole mapping per document to notice a
 dynamic-mapping change (now `learn_dynamic` reports the names it added).
 Three quiet passes after 5.7, security on:
 
-| dimension | pass 1: OS plain HTTP / BS security HTTP | pass 2: OS plain HTTP / BS security HTTPS | pass 3: OS plugin HTTPS / BS security HTTPS |
+| dimension | pass 1: OS plain HTTP / VS security HTTP | pass 2: OS plain HTTP / VS security HTTPS | pass 3: OS plugin HTTPS / VS security HTTPS |
 |---|---|---|---|
 | index docs/s | 60,822 / **97,356** | 60,854 / **93,048** | 52,932 / **92,037** |
 | memory | 1.83 GiB / 392 MiB | 1.84 GiB / 395 MiB | 1.95 GiB / 401 MiB |
@@ -860,7 +860,7 @@ for, seeded and repeatable.
   `<data>/_state/`, so a node is the same node after a restart; a fresh
   ephemeral id each start.
 - `src/cluster/tcp.rs`: the production transport -- a listener on
-  `transport.port` (9300; `BOOSTSEARCH_TRANSPORT_PORT` for tests), one
+  `transport.port` (9300; `VELOSEARCH_TRANSPORT_PORT` for tests), one
   framed connection per peer opened on demand, a handshake
   (`internal:transport/handshake`) carrying identity and cluster name so
   a connection is known by the node behind it, delivery by node id.
@@ -1016,7 +1016,7 @@ every open connection to a peer and a connection removes only its own
 queue on close; its reconnect handle is the transport's own weak `Arc`
 rather than a thread-local only the main thread had (test:
 `three_nodes_dial_each_other_at_once_and_all_pairs_talk_both_ways`).
-`BOOSTSEARCH_CLUSTER_DEBUG=2` traces every input and output through the
+`VELOSEARCH_CLUSTER_DEBUG=2` traces every input and output through the
 runtime. Gates: unit 39/39, phase1 398/398; bench after 6.4 wins all
 twelve dimensions against plain OpenSearch (index 100,454 vs 63,464 docs/s,
 383MiB vs 1.96GiB, every query p50 lower) and against os-secure (index
@@ -1218,7 +1218,7 @@ picks (`_local`, `_only_nodes:`, a custom string hashed to the same copy
 every time). Each node runs the search as it always did, in a native
 mode that stops before the tail: its page of `from+size` hits with the
 order each write arrived in, and its aggregations still intermediate
-(postcard bytes of BoostCore's intermediate results, which the fork
+(postcard bytes of VeloCore's intermediate results, which the fork
 serialises for this). The coordinator merges the pages by the request's
 sort -- the same rules as the local page cut: sort values with `missing`
 last, then score, then the node named first, then write order -- cuts
@@ -1317,8 +1317,8 @@ on one row and stays the documented transport mismatch.
 `tools/linearize.py` works a few keys against three live nodes from six
 threads, recording every operation's call and return times, while it
 cuts partitions and stops processes: a partition through each node's
-`POST /_boost/chaos` switch (`{"cut": [names]}`, `{"heal": true}`; the
-route exists only with `BOOSTSEARCH_CHAOS=1`), which drops frames to and
+`POST /_velo/chaos` switch (`{"cut": [names]}`, `{"heal": true}`; the
+route exists only with `VELOSEARCH_CHAOS=1`), which drops frames to and
 from the named peers inside the transport for real, and a stop through
 SIGSTOP/SIGCONT. At the end it waits for the index to be green on all
 three nodes, reads every key from every node with `preference=_local`,
@@ -1569,7 +1569,7 @@ seeds, the rolling restart and the rolling upgrade with no acknowledged
 write lost and no copy behind;
 bench after 6.12 wins every dimension in passes 1 and 3 (index 67,979 vs
 63,103 docs/s and 394MiB vs 2.2GiB against plain OpenSearch; 64,989 vs
-53,722 against os-secure), and in pass 2 -- BoostSearch on TLS against
+53,722 against os-secure), and in pass 2 -- VeloSearch on TLS against
 OpenSearch on plain HTTP, the documented transport mismatch -- every row
 but `cardinality` (1.07 ms against 0.98 ms). The absolute numbers on both
 sides are lower than 6.10's on this machine, which had been running chaos
@@ -1701,7 +1701,7 @@ TLS-against-plain pass as well).
 
 ## 7.1 -- Dashboards, end to end
 
-OpenSearch Dashboards 3.1.0 was pointed at a single BoostSearch node and
+OpenSearch Dashboards 3.1.0 was pointed at a single VeloSearch node and
 driven the way a person drives it. It migrated its saved objects on the
 first start (a fresh `.kibana_1` with the `.kibana` alias over it, and a
 second start that had it move to `.kibana_2` and swap the alias across),
@@ -1810,7 +1810,7 @@ started at 99 of 127 and found seven things:
     OpenSearch refuses are refused, with the complaint it writes.
   - **A `filters` aggregation under another aggregation was not peeled.**
     Only the top level was looked at, so a `filters` inside a `terms` was
-    handed to BoostCore, which has no parser for it. `filters` and
+    handed to VeloCore, which has no parser for it. `filters` and
     `percentiles` are peeled wherever they sit now.
   - **A `terms` aggregation over an analysed text field returned the
     text.** A text field holds tokens, not values -- OpenSearch buckets
@@ -2093,13 +2093,13 @@ Reading request lines leniently and buffering a response before it is
 encrypted are both on the path every request takes, so the matrix was run
 again -- three passes, the same machine, nothing else on it.
 
-  - **Plain against plain** (BoostSearch with security on, OpenSearch
-    with no security plugin): BoostSearch wins **all eleven**. 92,711
+  - **Plain against plain** (VeloSearch with security on, OpenSearch
+    with no security plugin): VeloSearch wins **all eleven**. 92,711
     against 62,785 docs/s; every latency between 1.2 and 4 times better.
-  - **TLS against TLS** (both with their security plugin): BoostSearch
+  - **TLS against TLS** (both with their security plugin): VeloSearch
     wins **all eleven**, at 88,201 against 59,707 docs/s and 389MiB
     against 2.025GiB -- a fifth of the memory.
-  - **Our TLS against their plain HTTP**: BoostSearch wins the indexing
+  - **Our TLS against their plain HTTP**: VeloSearch wins the indexing
     and most of the queries, and loses the three or four smallest
     aggregations by two to four tenths of a millisecond -- which is what
     TLS costs us on this machine. Which of those rows falls either way
@@ -2475,7 +2475,7 @@ compressed as hard as it goes on both sides -- `best_compression` against
 `best_compression` -- the stored source stops being the difference and the
 inverted index is all that is left:
 
-| | BoostSearch | Lucene |
+| | VeloSearch | Lucene |
 |---|---|---|
 | stored source | **6.25MiB** | 6.70MiB |
 | term dictionary | 7.51 | **5.35** |
@@ -2490,7 +2490,7 @@ the same documents, and norms and positions each about twice. Lucene stores a
 term whose posting list is one document inline in the term dictionary rather
 than in the postings file, and blocks the rest at 128 documents with skip
 data; norms with a constant value cost it nothing. None of that is a setting
-on our side -- it is BoostCore's index format, and closing it is engine work
+on our side -- it is VeloCore's index format, and closing it is engine work
 with its own ADR, not more tuning here.
 
 Two smaller things this measurement settled, recorded so they are not
@@ -3073,7 +3073,7 @@ the ones that are not perfect say which and why.
 
 `docs/settings.md` lists every setting the binary reads. `docs/upgrading.md`
 is two procedures, because two different things are called an upgrade: putting
-this where an OpenSearch cluster is now, and moving a BoostSearch cluster
+this where an OpenSearch cluster is now, and moving a VeloSearch cluster
 between its own versions.
 
 The Dockerfile was a bench image — root, no volume, no healthcheck, and a
@@ -3450,7 +3450,7 @@ What it learned:
     route's job. Two consoles putting the index right at once are serialised
     in-process as well as by the engine's create.
 
-Setting: `BOOSTSEARCH_CONSOLE_DEBUG` says what the console did to its index
+Setting: `VELOSEARCH_CONSOLE_DEBUG` says what the console did to its index
 and why, and each search it ran. Tools: `tools/osd_pin.py` reads through the
 alias.
 
@@ -3508,7 +3508,7 @@ scripted update so that two pages counting at once both count; `/api/stats`
 in that route's spelling, with the cluster's id and what the server has been
 used for when asked at length. And three things of the server itself:
 answers compressed for a caller that takes them unless the page is embedded
-somewhere the operator did not list (`BOOSTSEARCH_CONSOLE_COMPRESSION_REFERRERS`),
+somewhere the operator did not list (`VELOSEARCH_CONSOLE_COMPRESSION_REFERRERS`),
 a cookie header that cannot be read refused with the reference's words, and
 a JSON 404 for every path nobody serves.
 
@@ -3538,7 +3538,7 @@ collection, which the reference does not serve either.
 ### 13.6 — The gate
 
 Every flow Phase 7.1 drove, driven again through our server with the front
-end unchanged, against a BoostSearch node with a 500-line index: an index
+end unchanged, against a VeloSearch node with a 500-line index: an index
 pattern made in the management page (the fields resolved through
 `_fields_for_wildcard`, the pattern through `resolve_index`); **Discover**
 drawing its sidebar, its histogram and its table, 500 of 500; the
@@ -3684,9 +3684,9 @@ no token. The fixture's twelve legitimate cases answer as before.
 **The console.** No request-authenticity check at all: a page on any
 origin could `POST /api/ism/apiCaller` with `transport.request DELETE /*`
 as a CORS-simple request. A request that changes something must carry the
-`osd-xsrf` header now, as the Node server requires; `BOOSTSEARCH_CONSOLE_XSRF=false`
+`osd-xsrf` header now, as the Node server requires; `VELOSEARCH_CONSOLE_XSRF=false`
 is its `--server.xsrf.disableProtection=true`, which its own suite needs.
-The Dev Tools proxy takes `BOOSTSEARCH_CONSOLE_PROXY_FILTER`, the Node
+The Dev Tools proxy takes `VELOSEARCH_CONSOLE_PROXY_FILTER`, the Node
 server's `console.proxyFilter`, defaulting as it does to everything.
 
 **Snapshots.** A snapshot name was joined onto the repository path as
@@ -3703,7 +3703,7 @@ when it is written, with the plugin's message.
 
 **The image.** It bound every interface with security off by default. A
 node refuses to listen on a non-loopback address with security off unless
-the operator says so (`BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true`), which
+the operator says so (`VELOSEARCH_PLUGINS_SECURITY_DISABLED=true`), which
 is what the OpenSearch image asks for as `DISABLE_SECURITY_PLUGIN`.
 
 Measured: a restricted user (`public*` read only) gets 403 on `secret`,
@@ -3853,7 +3853,7 @@ that connection, whatever it wrote.
 
 **The port is not opened by accident.** A node refuses to listen for
 transport connections on a non-loopback address with transport TLS off,
-unless the operator says `BOOSTSEARCH_TRANSPORT_INSECURE=true`. It is the
+unless the operator says `VELOSEARCH_TRANSPORT_INSECURE=true`. It is the
 rule the HTTP port already followed, and the image says so.
 
 **And what the cluster knows.** An election is started, and a shard
@@ -4441,7 +4441,7 @@ nothing had been acknowledged. `yaml_runner.py` counted a manifest that
 matched no file as a pass, and let a HEAD answer any status at all with an
 empty body as long as it was empty. `knn_check.py` compared two empty
 answers across a restart and called them equal, and killed every
-`release/boostsearch` on the machine rather than its own. And `release.yml`
+`release/velosearch` on the machine rather than its own. And `release.yml`
 ran `fmt`, `clippy` and the unit tests under a comment saying "the gates run
 again on the tag": it runs the ci workflow itself now.
 
@@ -5162,7 +5162,7 @@ three-run baseline on this machine.
 
 The first thing the new gate said was that this engine had lost 5.2% of
 `rss_mb_after_search` since August. It had not: `tools/bench.py` sampled memory
-by looking through the process table for a command containing `boostsearch`
+by looking through the process table for a command containing `velosearch`
 and taking the **largest** match, so any other node left running on the machine
 -- another gate, another bench -- was reported as this one's memory. The
 recorded runs say so themselves: `rss_mb_idle` has a median of 257 MB across
@@ -5174,9 +5174,9 @@ process answers nothing at all and says why -- a missing number is worth more
 than a wrong one. With that, the spread between three runs of one build fell
 from 17.7 MB to 8.7 MB, and the comparison is:
 
-    rss idle          OpenSearch 1095.2 MB    BoostSearch  19.0 MB
-    rss after index   OpenSearch 1085.6 MB    BoostSearch 261.3 MB
-    rss after search  OpenSearch 1112.4 MB    BoostSearch 269.2 MB
+    rss idle          OpenSearch 1095.2 MB    VeloSearch  19.0 MB
+    rss after index   OpenSearch 1085.6 MB    VeloSearch 261.3 MB
+    rss after search  OpenSearch 1112.4 MB    VeloSearch 269.2 MB
 
 Ahead on all 34 dimensions, against numbers measured once and kept.
 
@@ -5321,7 +5321,7 @@ document-level security paths.
 This one brought in OpenSearch's cross-cluster search suite: the eleven YAML
 files under `qa/multi-cluster-search`, run against two nodes -- a remote,
 filled by `tools/ccs_remote_manifest.json`, and a local node told about it by
-`BOOSTSEARCH_CLUSTER_REMOTE` or `cluster.remote.<name>.*`, which runs
+`VELOSEARCH_CLUSTER_REMOTE` or `cluster.remote.<name>.*`, which runs
 `tools/ccs_local_manifest.json`. Cross-cluster search did not exist before;
 it does now (`src/api/cluster/remote.rs`): `cluster:index` expressions are
 split, each remote is asked over HTTP with a timeout, and the answers are
@@ -6225,7 +6225,7 @@ timing the fault depends on; what these runs say is only that the trace does
 not reproduce it, and the case for the change rests on the timelines of the
 four and on what the code did with a stopped clock.
 
-Every write can now be followed through a run with `BOOSTSEARCH_TRACE_WRITES`:
+Every write can now be followed through a run with `VELOSEARCH_TRACE_WRITES`:
 each node logs, per document, what the primary copied and to whom, what it
 answered, what a copy took or refused and under which term, what waited for
 a fill, and what a fill brought.
@@ -6993,7 +6993,7 @@ they were put. Nothing takes them away again. A resync trims a copy the new
 primary can see and this one was not in the set; a fill replaces a copy from
 the primary and this one was what others were filled *from*. The instrument
 that found it is four lines: at each of the three refusals, if
-`BOOSTSEARCH_CLUSTER_DEBUG` is set, the ids that were written are printed.
+`VELOSEARCH_CLUSTER_DEBUG` is set, the ids that were written are printed.
 Two hundred and twenty-five runs with full tracing on found nothing --
 tracing every write is slow enough to close the window -- and the cheap
 note found it at the second run.
@@ -7318,7 +7318,7 @@ and two implementations of the same sketch agree about the shape of the
 answer and not about its fourth decimal. The canonical corpus reads 164 of
 183.
 
-The cluster notes are also in this commit, behind `BOOSTSEARCH_CLUSTER_DEBUG`:
+The cluster notes are also in this commit, behind `VELOSEARCH_CLUSTER_DEBUG`:
 a fill says which node it came from and at what sequence number the copy
 stands, a catch-up where it started and stopped, a translog replay where it
 left the counter, and a resync at what number the new primary stands.
@@ -7338,7 +7338,7 @@ frequency is its frequencies added up with their weights, and its length is
 its lengths added up with their weights and then put through the one-byte
 length encoding like any other. Worked by hand on three documents those
 rules give 0.5741, 0.4760 and 0.4715 -- OpenSearch 3.8.0's numbers -- and
-`src/query/combined.rs` is those rules, reading BoostCore's per-path counts
+`src/query/combined.rs` is those rules, reading VeloCore's per-path counts
 and lengths.
 
 On four hundred documents in three segments the scores were still a
@@ -7347,7 +7347,7 @@ field. The per-path token count BM25 divides by was added up from each
 document's length byte, which is lossy above forty or so tokens: 14,190
 where the documents held 14,362, an average of 41.7 where Lucene has 42.2.
 Every score on a field of long values was a little under the reference's.
-The fix is in BoostCore (`b3819c5`): the writer counts a path's tokens as
+The fix is in VeloCore (`b3819c5`): the writer counts a path's tokens as
 they arrive, and a merge carries the exact counts through, less what deleted
 documents held. With it, six `combined_fields` shapes and a plain `match`
 return the reference's top twenty-five with the same scores to three places,
@@ -7413,7 +7413,7 @@ Still open: a write that a demoted primary took in the old term can survive on
 it after promotion (chaos run 20), and a copy is sometimes found behind for a
 few seconds with documents that then arrive at the same sequence number (run
 52) -- whether that is a check that reads too early or a real gap is not yet
-settled. BoostCore `b3819c5` is still unpushed.
+settled. VeloCore `b3819c5` is still unpushed.
 
 ### Tooling -- a copy moved during the check was read as a copy behind
 
@@ -7560,11 +7560,11 @@ Highlighting ignored nearly everything a request asked of it. Every highlighter 
 
 ### P2 -- positional queries walk positions as Lucene does (439f4ed)
 
-`span_near` was built as a phrase: it ignored `in_order` -- [notice, terminate] at slop 7 matched a clause where the reference finds nothing -- refused `in_order: false`, took `span_multi` only as its last clause and dropped its slop. `span_not` returned the included clause whole, `span_first` ignored `end` over a `span_near`, span hits scored 1.0, interval hits a flat 0.5, a sloppy phrase as if every match were exact, and `term` on a text field without term frequency. A `match_phrase` across a dropped stop word found nothing. `more_like_this` split text on spaces and applied none of its thresholds, and `_termvectors` reported each document's own count as `ttf` (party 2, not 15). The span queries, intervals and sloppy phrases now walk each document's positions as Lucene 10.5's classes do, read from the reference's own jars, and score as Lucene does; `match_phrase` keeps the gap a dropped stop word leaves; `more_like_this` chooses its terms as XMoreLikeThis does; term vectors count across the index. Intervals is a real query now, so it may sit in `should` or `must_not`. 185 requests covering every span kind, interval rules and filters, sloppy and stop-word phrases, `more_like_this` options and term vectors: 8 of the first 115 the same before, all 185 after (scores on the example's index within 0.4%, the lossy average length the unpushed BoostCore commit fixes). Found and left: `match` on a keyword field scores 0.433 where the reference scores 1.0, and a span on a keyword field answers where the reference refuses. Corpus 1,427, phase1 398, query DSL replays 61 and 45 unchanged.
+`span_near` was built as a phrase: it ignored `in_order` -- [notice, terminate] at slop 7 matched a clause where the reference finds nothing -- refused `in_order: false`, took `span_multi` only as its last clause and dropped its slop. `span_not` returned the included clause whole, `span_first` ignored `end` over a `span_near`, span hits scored 1.0, interval hits a flat 0.5, a sloppy phrase as if every match were exact, and `term` on a text field without term frequency. A `match_phrase` across a dropped stop word found nothing. `more_like_this` split text on spaces and applied none of its thresholds, and `_termvectors` reported each document's own count as `ttf` (party 2, not 15). The span queries, intervals and sloppy phrases now walk each document's positions as Lucene 10.5's classes do, read from the reference's own jars, and score as Lucene does; `match_phrase` keeps the gap a dropped stop word leaves; `more_like_this` chooses its terms as XMoreLikeThis does; term vectors count across the index. Intervals is a real query now, so it may sit in `should` or `must_not`. 185 requests covering every span kind, interval rules and filters, sloppy and stop-word phrases, `more_like_this` options and term vectors: 8 of the first 115 the same before, all 185 after (scores on the example's index within 0.4%, the lossy average length the unpushed VeloCore commit fixes). Found and left: `match` on a keyword field scores 0.433 where the reference scores 1.0, and a span on a keyword field answers where the reference refuses. Corpus 1,427, phase1 398, query DSL replays 61 and 45 unchanged.
 
 ### P2 -- aggregations: top_hits under every bucket, t-digest exact, error bounds per shard (a4df8e6)
 
-A `top_hits` under `rare_terms` or `composite` was refused without a sort and answered empty hits with one, `variable_width_histogram` gave other buckets ([2652,137,1,134,80] against [2654,133,136,34,47]), `missing` on `histogram` was ignored, `format` on a date `min` was ignored, a single shard reported `doc_count_error_upper_bound` 146 where the reference reports 0, a `terms` on `_index` under another bucket was empty, and the median came out 72.87 against 72.45. Aggregations the engine runs itself are now held back and run in each bucket, narrowed to its documents, so `top_hits` works under every bucket with all its options. `variable_width_histogram` is a port of OpenSearch's aggregator, down to its scrambled merge map and the reduce each shard does before the last. `percentiles` and `median_absolute_deviation` are a port of t-digest 3.3's MergingDigest, with Java's logarithm, its centroid rounding and the serialisation between shard and answer, and give the reference's numbers exactly (72.4504065764939). A shard reader gives these and the terms error bounds each shard's documents in its own order, so counts, `sum_other_doc_count` and `doc_count_error_upper_bound` are what OpenSearch's per-shard cuts produce; BoostCore is no longer asked to cut each segment at `shard_size` (a region counted 292 instead of 569). `missing` works on `histogram` and `range`; `format` writes `value_as_string` and the `*_as_string` fields with Java's decimal rules; `_index` and `_id` terms work under other buckets and metadata fields without fielddata are refused. Aggregation names come back in the Java HashMap order the reference uses -- not request order, as the report assumed. 131 of 140 cases the same as OpenSearch 3.8.0. Left: sums add plainly where OpenSearch compensates (`23471.739999999998` against `23471.74`), tie order among equal-scored hits, date terms across shards, and terms on a multi-shard index now read every matching document when a shard could have cut terms. Corpus 1,427, phase1 398, aggs replay 40/43 unchanged.
+A `top_hits` under `rare_terms` or `composite` was refused without a sort and answered empty hits with one, `variable_width_histogram` gave other buckets ([2652,137,1,134,80] against [2654,133,136,34,47]), `missing` on `histogram` was ignored, `format` on a date `min` was ignored, a single shard reported `doc_count_error_upper_bound` 146 where the reference reports 0, a `terms` on `_index` under another bucket was empty, and the median came out 72.87 against 72.45. Aggregations the engine runs itself are now held back and run in each bucket, narrowed to its documents, so `top_hits` works under every bucket with all its options. `variable_width_histogram` is a port of OpenSearch's aggregator, down to its scrambled merge map and the reduce each shard does before the last. `percentiles` and `median_absolute_deviation` are a port of t-digest 3.3's MergingDigest, with Java's logarithm, its centroid rounding and the serialisation between shard and answer, and give the reference's numbers exactly (72.4504065764939). A shard reader gives these and the terms error bounds each shard's documents in its own order, so counts, `sum_other_doc_count` and `doc_count_error_upper_bound` are what OpenSearch's per-shard cuts produce; VeloCore is no longer asked to cut each segment at `shard_size` (a region counted 292 instead of 569). `missing` works on `histogram` and `range`; `format` writes `value_as_string` and the `*_as_string` fields with Java's decimal rules; `_index` and `_id` terms work under other buckets and metadata fields without fielddata are refused. Aggregation names come back in the Java HashMap order the reference uses -- not request order, as the report assumed. 131 of 140 cases the same as OpenSearch 3.8.0. Left: sums add plainly where OpenSearch compensates (`23471.739999999998` against `23471.74`), tie order among equal-scored hits, date terms across shards, and terms on a multi-shard index now read every matching document when a shard could have cut terms. Corpus 1,427, phase1 398, aggs replay 40/43 unchanged.
 
 ### P2 -- by-query jobs are tasks, and the tasks API acts on them (d9d9605)
 
@@ -7584,7 +7584,7 @@ The attachment processor read only plain text and Word files, named everything e
 
 ### P2 -- four scoring differences found while merging
 
-Found by the search-pipeline work and checked against OpenSearch 3.1.0 and 3.8.0, which agree on each. **A clause matching a whole segment lost its score.** `{"bool":{"must":[{"range":{"n":{"gte":2}}}],"filter":[{"term":{"k":"a"}}]}}` scored one hit 1.0 and the other 0.0, in the wrong order; the explanation said "sum of: 1.0, 0.0" and valued it 0.0. BoostCore's range, exists and all-documents queries hand back an all-documents scorer for a segment every document of which matches, and its boolean drops those from an intersection as an optimisation -- and their scores with them. Such a clause is now behind a constant-score wrapper carrying its boost, which the boolean does not recognise, and the scores are 1.0 throughout (3.0 with a boost of 3). **`"sort": ["_score"]` sorted worst first**, and with no scores: a score sort is descending unless told otherwise, and a sort that reads the score keeps it on the hits. **A `match` on a keyword scored by BM25** (0.0763) where the reference builds a constant-score term query (1.0). **Every score was printed widened to 64 bits**: a score is a 32-bit float and Java prints the shortest text that reads back as it, so `0.50652754` came out as `0.5065275430679321` on every hit, `max_score` and explanation; they are written short now. Corpus 1,427, phase1 398, the query replays 60/61 and 45/45, aggregations 40/43, canonical 164/183, all as before.
+Found by the search-pipeline work and checked against OpenSearch 3.1.0 and 3.8.0, which agree on each. **A clause matching a whole segment lost its score.** `{"bool":{"must":[{"range":{"n":{"gte":2}}}],"filter":[{"term":{"k":"a"}}]}}` scored one hit 1.0 and the other 0.0, in the wrong order; the explanation said "sum of: 1.0, 0.0" and valued it 0.0. VeloCore's range, exists and all-documents queries hand back an all-documents scorer for a segment every document of which matches, and its boolean drops those from an intersection as an optimisation -- and their scores with them. Such a clause is now behind a constant-score wrapper carrying its boost, which the boolean does not recognise, and the scores are 1.0 throughout (3.0 with a boost of 3). **`"sort": ["_score"]` sorted worst first**, and with no scores: a score sort is descending unless told otherwise, and a sort that reads the score keeps it on the hits. **A `match` on a keyword scored by BM25** (0.0763) where the reference builds a constant-score term query (1.0). **Every score was printed widened to 64 bits**: a score is a 32-bit float and Java prints the shortest text that reads back as it, so `0.50652754` came out as `0.5065275430679321` on every hit, `max_score` and explanation; they are written short now. Corpus 1,427, phase1 398, the query replays 60/61 and 45/45, aggregations 40/43, canonical 164/183, all as before.
 
 ### The gates on everything merged
 
@@ -7661,14 +7661,14 @@ the search run, 187 MB then 250 MB, which is the allocator rather than a
 change in the code. The OpenSearch figures the gate prints beside these were
 measured on the Mac and are not a comparison on this machine.
 
-The node runs there as a service: its own user, `/var/lib/boostsearch` for its
-data, `/etc/boostsearch` for its configuration, `/var/log/boostsearch` for its
+The node runs there as a service: its own user, `/var/lib/velosearch` for its
+data, `/etc/velosearch` for its configuration, `/var/log/velosearch` for its
 logs, started at boot, restarted if it dies, and **listening on 127.0.0.1
 only** -- reached through an SSH tunnel, since nothing about opening a port to
 the internet has been decided. A write survived a restart of the service, and
 `_cluster/health` reads green.
 
-### The pin moves to BoostCore b3819c5
+### The pin moves to VeloCore b3819c5
 
 The fork's commit is on its remote, so `Cargo.toml` pins `b3819c5` instead of
 `08e39fc`. It is the exact per-path token count: an average field length read
@@ -7684,12 +7684,12 @@ corpus 166 of 183.
 ### Both engines, one machine, one day
 
 The performance table in the README was OpenSearch measured once in August and
-BoostSearch measured in September, each on the laptop. Both were measured
+VeloSearch measured in September, each on the laptop. Both were measured
 again on the Google Compute Engine machine the node now runs on -- eight
 vCPUs, Ubuntu 24.04 -- on the same day, with the same corpus of 200,000
 web-log documents and the same client driving each in turn with nothing else
 running: OpenSearch 3.1.0 from its official image with security off, five
-runs, and this build, five runs. BoostSearch is ahead on all thirty-four
+runs, and this build, five runs. VeloSearch is ahead on all thirty-four
 dimensions: 378.7 queries a second against 134.9 on one client, 665.9 against
 425.8 on eight, 24,921 documents a second indexed against 21,725, 37.7 MB
 resident when idle against 1,501, and every query shape between 22% and 82%
@@ -7703,18 +7703,18 @@ and are not in this repository. They were kept in `/tmp`, which a restart
 empties, and the module gate then read 871 of 890 where it reads 880 -- seven
 geoip sections and the Beider-Morse one failing for want of a file rather than
 for anything the code does, which is exactly what this ledger and the README
-say those numbers mean. They are in `~/boost-fixtures/geoip-db` (the three
+say those numbers mean. They are in `~/velo-fixtures/geoip-db` (the three
 GeoLite2 files out of OpenSearch's own container) and
-`~/boost-fixtures/phonetic-rules` (the hundred and twenty-seven
+`~/velo-fixtures/phonetic-rules` (the hundred and twenty-seven
 `org/apache/commons/codec/language/bm` files of commons-codec 1.18.0) now, and
-`tools/gate_node.sh` points at them, with `BOOST_FIXTURES` to move them. The
+`tools/gate_node.sh` points at them, with `VELO_FIXTURES` to move them. The
 module gate reads 880 of 890 again: the six left are stempel, ukrainian and
 the analysis-phone plugin listing, as before.
 
 ### Images, built from green commits and pushed to Artifact Registry
 
 `.github/workflows/image.yml` builds the container image and pushes it to
-`asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch`. It never
+`asia-southeast1-docker.pkg.dev/codefin-lab/velosearch/velosearch`. It never
 builds from a commit the gates did not pass on: on `main` it runs when the
 `ci` workflow finishes green and checks out that run's commit rather than
 whatever `main` has become, and for a release tag `release.yml` calls it after
@@ -7724,9 +7724,9 @@ through its own `HEALTHCHECK`. Tags: the commit's sha, `main` and `latest`
 for main, the version without its `v` for a release.
 
 No key is stored anywhere. GitHub's OIDC token is exchanged through a
-workload identity pool of its own, `github-boostsearch`, whose provider
+workload identity pool of its own, `github-velosearch`, whose provider
 accepts this repository only and only `main` or a `v*` tag; the service
-account it becomes, `gh-boostsearch-image`, holds `artifactregistry.writer` on
+account it becomes, `gh-velosearch-image`, holds `artifactregistry.writer` on
 this one repository and nothing else. The project's existing `github` pool
 was left alone: it belongs to another repository and is managed elsewhere.
 
@@ -7735,3 +7735,31 @@ CI itself had been red: it fetches OpenSearch's newest suite, which gained
 `_cat/indices` had no `system` filter. It has one now, with the `system` and
 `system.description` columns, and the file is in the local manifest: 1,428 of
 1,428.
+
+## VeloSearch
+
+The project is renamed: BoostSearch is **VeloSearch**, and the fork of tantivy
+under it, BoostCore, is **VeloCore**. Nothing of the old names is kept -- no
+alias, no fallback:
+
+- the crate, the library path and the binary are `velosearch`; the engine's
+  crates are `velocore`, `velocore-common`, `velocore-columnar` and the rest,
+  pinned at `codefin-lab/velocore@57fcb12`, the commit that renames them
+- every `BOOSTSEARCH_*` environment variable is `VELOSEARCH_*`, and the tools'
+  own `BOOST_*` knobs are `VELO_*`; the examples' `BS` is `VS`
+- a node answers `"distribution": "velosearch"` and names its engine
+  `VeloCore`; its own endpoints are `/_velosearch/...` and `/_velo/chaos`
+- the image is `asia-southeast1-docker.pkg.dev/codefin-lab/velosearch/velosearch`,
+  pushed through a workload identity pool and service account of the new name
+  that accept `codefin-lab/velosearch` only; the old registry repository, pool
+  and service account are left where they are and receive nothing more
+- the repositories are `codefin-lab/velosearch` and `codefin-lab/velocore`
+- the gates' fixtures live in `~/velo-fixtures`, and the historical bench runs
+  are `velosearch-*.json` and `final-velosearch-clean-*.json`
+
+The ledger above is renamed with it, so that it reads as the history of one
+project. On the renamed build: 291 unit tests, clippy clean, the core corpus
+1,428 of 1,428, phase1 398, `run-all.sh` 22 of 22, restart, refusal, DLS,
+health, disk fault, the auth matrix against its baseline, and 500 fuzz probes.
+The service on `boostsearch-1` is still the binary it was deployed as, under
+its old name, and is untouched by this.

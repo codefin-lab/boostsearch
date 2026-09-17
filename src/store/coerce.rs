@@ -101,8 +101,8 @@ pub fn deep_merge(base: &mut Value, patch: &Value) {
     }
 }
 
-/// Convert a JSON document into a BoostCore document with both views plus `_source`.
-/// Build the BoostCore document. Takes the source by value so the JSON tree is
+/// Convert a JSON document into a VeloCore document with both views plus `_source`.
+/// Build the VeloCore document. Takes the source by value so the JSON tree is
 /// moved into the first view instead of deep-copied for both.
 /// Apply a normalizer the way OpenSearch does at index time.
 pub fn normalize(value: &Value, normalizer: &str) -> Option<Value> {

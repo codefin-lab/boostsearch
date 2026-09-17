@@ -14,7 +14,7 @@ serve:
 	./node.sh
 
 run:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS="$${BS:-http://127.0.0.1:9283}" ./run.sh'
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS="$${VS:-http://127.0.0.1:9283}" ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -33,6 +33,6 @@ print('data/files: %d text files readable, %d Word files hold a document and its
 
 clean:
 	@sh -c 'if [ -f .env ]; then . ./.env; fi; \
-for i in $(INDICES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9283}/$$i" > /dev/null 2>&1 || true; done; \
-for p in $(PIPELINES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9283}/_ingest/pipeline/$$p" > /dev/null 2>&1 || true; done; \
+for i in $(INDICES); do curl -sS -X DELETE "$${VS:-http://127.0.0.1:9283}/$$i" > /dev/null 2>&1 || true; done; \
+for p in $(PIPELINES); do curl -sS -X DELETE "$${VS:-http://127.0.0.1:9283}/_ingest/pipeline/$$p" > /dev/null 2>&1 || true; done; \
 echo "deleted: $(INDICES), and the pipelines $(PIPELINES)"'

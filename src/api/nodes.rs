@@ -630,7 +630,7 @@ pub async fn wlm_stats_list(Query(p): Query<Params>) -> Response {
 }
 
 /// The attributes this node was started with: the built-in one, and whatever
-/// `BOOSTSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
+/// `VELOSEARCH_NODE_ATTRS` named, as `name=value` pairs separated by commas.
 /// The OpenSearch modules this server answers for.
 ///
 /// A module is not a thing loaded here -- everything is built in -- but the
@@ -727,7 +727,7 @@ fn modules() -> Value {
 
 pub fn node_attrs() -> Vec<(String, String)> {
     let mut out = vec![("shard_indexing_pressure_enabled".to_string(), "true".to_string())];
-    if let Ok(spec) = std::env::var("BOOSTSEARCH_NODE_ATTRS") {
+    if let Ok(spec) = std::env::var("VELOSEARCH_NODE_ATTRS") {
         for pair in spec.split(',') {
             if let Some((k, v)) = pair.split_once('=') {
                 let (k, v) = (k.trim(), v.trim());
@@ -793,7 +793,7 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
             id.as_str().to_string(),
             json!({
                 "name": n.name, "transport_address": n.transport_address, "host": ip, "ip": ip,
-                "version": "3.9.0", "build_type": "tar", "build_hash": "boostsearch",
+                "version": "3.9.0", "build_type": "tar", "build_hash": "velosearch",
                 "roles": n.roles, "attributes": n.attributes,
             }),
         );
@@ -804,7 +804,7 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
         "nodes": {crate::cluster::identity().id.as_str(): {
             "name": crate::cluster::identity().name, "transport_address": crate::cluster::identity().transport_address,
             "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host, "version": "3.9.0",
-            "build_type": "tar", "build_hash": "boostsearch", "roles": crate::cluster::identity().roles,
+            "build_type": "tar", "build_hash": "velosearch", "roles": crate::cluster::identity().roles,
             "attributes": crate::cluster::identity().attributes,
             "os": {"refresh_interval_in_millis": 1000,
                    "available_processors": num_cpus(),

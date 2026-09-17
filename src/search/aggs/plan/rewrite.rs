@@ -1,9 +1,9 @@
-//! Reshaping an aggregation request into the one BoostCore is given, and
+//! Reshaping an aggregation request into the one VeloCore is given, and
 //! the answer back into the one OpenSearch would have sent.
 
 use super::*;
 
-/// Dates in aggregation parameters may be date-only; BoostCore needs RFC3339.
+/// Dates in aggregation parameters may be date-only; VeloCore needs RFC3339.
 pub(crate) fn normalize_agg_dates(node: &mut Value) {
     match node {
         Value::Object(o) => {
@@ -28,9 +28,9 @@ pub(crate) fn normalize_agg_dates(node: &mut Value) {
     }
 }
 
-/// Render a small subset of the query DSL as a BoostCore query string, so a
+/// Render a small subset of the query DSL as a VeloCore query string, so a
 /// `filter` aggregation nested inside another bucket can still run.
-pub(crate) fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
+pub(crate) fn as_velocore_query_string(q: &Value, ctx: &Ctx) -> Option<String> {
     let o = q.as_object()?;
     let (kind, body) = o.iter().next()?;
     match kind.as_str() {
@@ -66,7 +66,7 @@ pub(crate) fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> 
                         other => vec![other.clone()],
                     };
                     for it in items {
-                        parts.push(format!("+({})", as_boostcore_query_string(&it, ctx)?));
+                        parts.push(format!("+({})", as_velocore_query_string(&it, ctx)?));
                     }
                 }
             }
@@ -76,7 +76,7 @@ pub(crate) fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> 
                     other => vec![other.clone()],
                 };
                 for it in items {
-                    parts.push(format!("-({})", as_boostcore_query_string(&it, ctx)?));
+                    parts.push(format!("-({})", as_velocore_query_string(&it, ctx)?));
                 }
             }
             if parts.is_empty() { None } else { Some(parts.join(" ")) }
@@ -85,7 +85,7 @@ pub(crate) fn as_boostcore_query_string(q: &Value, ctx: &Ctx) -> Option<String> 
     }
 }
 
-/// Nested `filter` aggregations become BoostCore's own filter, which speaks
+/// Nested `filter` aggregations become VeloCore's own filter, which speaks
 /// query strings. Top-level ones are handled by running a separate search.
 pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
     let Some(o) = node.as_object_mut() else { return };
@@ -96,7 +96,7 @@ pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
             for (_, sdef) in subo.iter_mut() {
                 if let Some(f) = sdef.get("filter").cloned()
                     && !f.is_string()
-                    && let Some(qs) = as_boostcore_query_string(&f, ctx)
+                    && let Some(qs) = as_velocore_query_string(&f, ctx)
                     && let Some(o) = sdef.as_object_mut()
                 {
                     o.insert("filter".into(), json!(qs));
@@ -108,7 +108,7 @@ pub(crate) fn lower_nested_filters(node: &mut Value, ctx: &Ctx) {
 }
 
 /// A terms aggregation may ask for one slice of the term space rather than the
-/// whole of it. BoostCore has no such notion, so the slice is taken here: the
+/// whole of it. VeloCore has no such notion, so the slice is taken here: the
 /// request goes down without the `include`, asking for enough terms that the
 /// wanted partition is whole, and the rest are dropped from the answer.
 pub(crate) fn extract_partitions(node: &mut Value) -> Vec<(String, i64, i64, usize)> {
@@ -255,7 +255,7 @@ pub(crate) fn rewrite_agg_fields(node: &mut Value, ctx: &Ctx) {
     }
 }
 
-/// BoostCore's aggregation model has no room for OpenSearch's `meta`, and it
+/// VeloCore's aggregation model has no room for OpenSearch's `meta`, and it
 /// spells the sub-aggregation key `aggs`. Strip one, normalise the other, and
 /// remember the metadata so it can be put back on the response.
 pub(crate) fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>, top: bool) {
@@ -272,18 +272,18 @@ pub(crate) fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>,
         }
         // `_term` and `_time` are the old spellings of `_key`, kept working
         // for the aggregations that were named before it was renamed
-        // BoostCore reads `shard_size` as a cut made in every segment, which a
+        // VeloCore reads `shard_size` as a cut made in every segment, which a
         // shard of OpenSearch never makes: one shard counts every term exactly
         // and cuts only the list it hands on. A `shard_size: 3` over an index
         // of several segments counted a region 292 times where it holds 569
-        // documents. BoostCore is asked to keep enough of each segment to
+        // documents. VeloCore is asked to keep enough of each segment to
         // count exactly, and the shards' cuts are made afterwards, from the
         // documents (see `shard_terms_bounds`).
         if let Some(Value::Object(terms)) = d.get_mut("terms") {
             let size = terms.get("size").and_then(|v| v.as_u64()).unwrap_or(10);
             terms.remove("shard_size");
             // Where the counts tie at the last bucket shown, OpenSearch shows
-            // the smaller keys, and BoostCore whichever it met first. It is
+            // the smaller keys, and VeloCore whichever it met first. It is
             // asked for some more than were wanted, and the answer is cut back
             // once the buckets are in the reference's order (`cut_terms`).
             let by_count = match terms.get("order") {
@@ -302,7 +302,7 @@ pub(crate) fn normalize_aggs(node: &mut Value, metas: &mut Vec<(String, Value)>,
         for agg in d.values_mut() {
             // A list of orders whose tie-break is the key ascending is the one
             // order before it: that tie-break is the one every terms answer
-            // is put in anyway. BoostCore takes a single order, and refused
+            // is put in anyway. VeloCore takes a single order, and refused
             // the list.
             if let Some(Value::Array(list)) = agg.get("order") {
                 let tie_break = |o: &Value| {

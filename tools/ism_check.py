@@ -8,9 +8,9 @@ is watched actually happening -- states entered, actions run, the index rolled
 over and in the end deleted by the policy rather than by anyone.
 
 Run against a node started with a short job interval, which is what
-`BOOSTSEARCH_ISM_INTERVAL_MS` is for:
+`VELOSEARCH_ISM_INTERVAL_MS` is for:
 
-    BOOSTSEARCH_ISM_INTERVAL_MS=2000 ./target/release/boostsearch
+    VELOSEARCH_ISM_INTERVAL_MS=2000 ./target/release/velosearch
     python3 tools/ism_check.py
 """
 import json
@@ -20,9 +20,9 @@ import time
 import urllib.error
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
 # how long one tick takes, so the checks wait for a tick rather than a guess
-TICK = float(os.environ.get("BOOST_ISM_TICK", "2.5"))
+TICK = float(os.environ.get("VELO_ISM_TICK", "2.5"))
 failures = []
 
 

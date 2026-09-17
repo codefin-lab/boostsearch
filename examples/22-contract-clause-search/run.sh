@@ -33,7 +33,7 @@ matched() {
 expect_marked() {
   local id=$1 field=$2 want=$3 file=$4 what=${5-}
   local got
-  got=$("${CURL[@]}" -X GET "$BS/$IDX/_search" -H 'Content-Type: application/json' --data-binary "@$file" 2>/dev/null \
+  got=$("${CURL[@]}" -X GET "$VS/$IDX/_search" -H 'Content-Type: application/json' --data-binary "@$file" 2>/dev/null \
     | python3 -c 'import json,sys
 id, field, want = sys.argv[1:4]
 try:

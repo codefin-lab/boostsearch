@@ -38,9 +38,9 @@ impl CalendarUnit {
 
     pub(crate) fn floor(
         self,
-        dt: boostcore::time::OffsetDateTime,
-    ) -> boostcore::time::OffsetDateTime {
-        use boostcore::time::{Date, Month, Time};
+        dt: velocore::time::OffsetDateTime,
+    ) -> velocore::time::OffsetDateTime {
+        use velocore::time::{Date, Month, Time};
         let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
         match self {
             // zero is in range for every one of these, whatever the instant
@@ -61,11 +61,11 @@ impl CalendarUnit {
             // calendar weeks start on Monday
             CalendarUnit::Week => {
                 let back = dt.weekday().number_days_from_monday() as i64;
-                midnight(dt.date() - boostcore::time::Duration::days(back))
+                midnight(dt.date() - velocore::time::Duration::days(back))
             }
             CalendarUnit::WeekSunday => {
                 let back = dt.weekday().number_days_from_sunday() as i64;
-                midnight(dt.date() - boostcore::time::Duration::days(back))
+                midnight(dt.date() - velocore::time::Duration::days(back))
             }
             // the first of a month exists in every month of every year the
             // instant itself could be in
@@ -85,10 +85,10 @@ impl CalendarUnit {
 
     pub(crate) fn advance(
         self,
-        dt: boostcore::time::OffsetDateTime,
-    ) -> boostcore::time::OffsetDateTime {
-        use boostcore::time::{Date, Duration, Month, Time};
-        let add_months = |dt: boostcore::time::OffsetDateTime, n: u32| {
+        dt: velocore::time::OffsetDateTime,
+    ) -> velocore::time::OffsetDateTime {
+        use velocore::time::{Date, Duration, Month, Time};
+        let add_months = |dt: velocore::time::OffsetDateTime, n: u32| {
             let total = dt.year() * 12 + (dt.month() as i32 - 1) + n as i32;
             let (y, m) = (total.div_euclid(12), total.rem_euclid(12) as u8 + 1);
             // a remainder of twelve plus one is a month, and the first of it

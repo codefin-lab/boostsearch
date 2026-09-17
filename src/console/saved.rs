@@ -589,7 +589,7 @@ impl Saved<'_> {
     /// time somebody opens it.
     pub fn find(&self, looking: &Looking) -> Result<Value, Failed> {
         let body = self.query_for(looking);
-        if std::env::var("BOOSTSEARCH_CONSOLE_DEBUG").is_ok() {
+        if std::env::var("VELOSEARCH_CONSOLE_DEBUG").is_ok() {
             eprintln!(
                 "  find {:?} ns={:?} size={}",
                 looking.types, looking.namespaces, looking.per_page

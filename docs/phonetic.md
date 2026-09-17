@@ -29,9 +29,9 @@ Naming a language needs the per-language files commons-codec ships
 nothing stops them being carried here; they are simply not vendored yet.
 Until they are, a filter that names a language is looked for on disk:
 
-1. `$BOOSTSEARCH_PHONETIC_RULES`
-2. `$BOOSTSEARCH_CONFIG/analysis-phonetic/`
-3. `$BOOSTSEARCH_DATA/config/analysis-phonetic/`
+1. `$VELOSEARCH_PHONETIC_RULES`
+2. `$VELOSEARCH_CONFIG/analysis-phonetic/`
+3. `$VELOSEARCH_DATA/config/analysis-phonetic/`
 4. `./config/analysis-phonetic/`
 
 Point one of those at a directory holding commons-codec's `bm` rule files and
@@ -42,8 +42,8 @@ does anything else.
 **With those files in place the whole phonetic suite passes**, including
 `30_beider_morse.yml` and its `languageset: polish` -- checked against
 commons-codec 1.18.0's own rule files, pointed at from outside this
-repository: `~/boost-fixtures/phonetic-rules`, which `tools/gate_node.sh`
-passes and `BOOST_FIXTURES` moves. The hundred and twenty-seven files are the
+repository: `~/velo-fixtures/phonetic-rules`, which `tools/gate_node.sh`
+passes and `VELO_FIXTURES` moves. The hundred and twenty-seven files are the
 `org/apache/commons/codec/language/bm` entries of the jar. What is missing is the data, not the code, and whether a release
 carries a hundred and twenty-seven files of somebody else's data -- even under
 a licence that allows it -- is a decision to make rather than something to

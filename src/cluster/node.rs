@@ -81,7 +81,7 @@ impl NodeIdentity {
             std::env::var("HOSTNAME")
                 .ok()
                 .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| "boostsearch".into())
+                .unwrap_or_else(|| "velosearch".into())
         });
         let roles = {
             let r = list_setting(settings, "node.roles");
@@ -107,7 +107,7 @@ impl NodeIdentity {
                 );
             }
         }
-        if let Ok(env) = std::env::var("BOOSTSEARCH_NODE_ATTRS") {
+        if let Ok(env) = std::env::var("VELOSEARCH_NODE_ATTRS") {
             for pair in env.split(',') {
                 if let Some((k, v)) = pair.split_once('=') {
                     attributes.insert(k.trim().to_string(), Value::String(v.trim().to_string()));
@@ -130,7 +130,7 @@ impl NodeIdentity {
             http_address: http_addr.to_string(),
             host,
             attributes,
-            cluster_name: setting(settings, "cluster.name").unwrap_or_else(|| "boostsearch".into()),
+            cluster_name: setting(settings, "cluster.name").unwrap_or_else(|| "velosearch".into()),
             seed_hosts,
             initial_cluster_manager_nodes: initial,
             single_node: discovery_type == "single-node",

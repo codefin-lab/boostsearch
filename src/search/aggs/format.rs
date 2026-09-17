@@ -409,7 +409,7 @@ pub(crate) fn name_date_metrics(
 /// lands in, and by the request between two that share one. The pipelines are
 /// not shard aggregations; they are added after the rest, in the order they
 /// were asked for. Here the aggregations are answered along several paths --
-/// BoostCore's, the ones walked a bucket at a time, the pipelines -- and each
+/// VeloCore's, the ones walked a bucket at a time, the pipelines -- and each
 /// path's answers were laid in as they came, so the names came back in an
 /// order neither the request nor the reference has. What is not an
 /// aggregation -- a bucket's key, its count -- keeps its place in front.
@@ -664,7 +664,7 @@ pub(crate) fn widen_number_keys(
 
 /// Cut each terms answer back to the size it was asked for.
 ///
-/// BoostCore was asked for more buckets than wanted, so that a tie at the
+/// VeloCore was asked for more buckets than wanted, so that a tie at the
 /// last one is settled the reference's way: by count, and then by the smaller
 /// key. What is cut off is counted among the other documents.
 pub(crate) fn cut_terms(result: &mut Value, req: &Value) {
@@ -823,7 +823,7 @@ pub(crate) fn format_terms_keys(
 
 /// A numeric range bucket names its bounds as doubles.
 ///
-/// BoostCore writes `*-50` where the suite expects `*-50.0`; the bounds are
+/// VeloCore writes `*-50` where the suite expects `*-50.0`; the bounds are
 /// already on the bucket, so the key is rebuilt from them rather than parsed.
 pub(crate) fn normalize_range_keys(node: &mut Value) {
     match node {

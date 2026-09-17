@@ -6,7 +6,7 @@ A filesystem repository may only be created under a path the node was started
 with. Start the node with one:
 
 ```bash
-make serve          # node.sh sets BOOSTSEARCH_PATH_REPO=/tmp/boost-repo
+make serve          # node.sh sets VELOSEARCH_PATH_REPO=/tmp/velo-repo
 ```
 
 The repository's `location` is relative to that directory.
@@ -79,7 +79,7 @@ measure when sizing a recovery window, not the snapshot duration.
 make clean          # deletes ledger, ledger-restored, other
 curl -XDELETE localhost:9272/_snapshot/backups/nightly-2
 curl -XDELETE localhost:9272/_snapshot/backups
-rm -rf /tmp/boost-repo/backups
+rm -rf /tmp/velo-repo/backups
 ```
 
 Deleting the repository registration does not delete its files; the last line

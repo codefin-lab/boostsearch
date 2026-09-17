@@ -453,7 +453,7 @@ mod tests {
         let mut held = Vectors::default();
         held.write(&fields, "one", &json!({"embedding": [1.5, -2.5]}));
         held.write(&fields, "two", &json!({"embedding": [0.0, 0.0]}));
-        let path = std::env::temp_dir().join(format!("boost-vectors-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("velo-vectors-{}", std::process::id()));
         held.save(&path, 7);
         let (read, seq) = Vectors::load(&path).expect("the table reads back");
         assert_eq!(seq, 7, "the table says which state of the index it holds");

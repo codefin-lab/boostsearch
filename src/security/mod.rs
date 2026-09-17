@@ -1528,9 +1528,9 @@ pub fn with_alias_filter(index: &str, query: Option<Value>) -> Option<Value> {
 /// Whether one document is inside the caller's view of its index.
 pub fn doc_visible(store: &crate::store::Store, g: &crate::store::IdxState, id: &str) -> bool {
     let Some(dls) = dls_for(store, &g.name) else { return true };
-    use boostcore::collector::Count;
-    use boostcore::query::{BooleanQuery, Occur, TermQuery};
-    use boostcore::schema::IndexRecordOption;
+    use velocore::collector::Count;
+    use velocore::query::{BooleanQuery, Occur, TermQuery};
+    use velocore::schema::IndexRecordOption;
     let searcher = g.reader.searcher();
     let ctx = crate::query::Ctx {
         fields: &g.fields,
@@ -1547,9 +1547,9 @@ pub fn doc_visible(store: &crate::store::Store, g: &crate::store::IdxState, id: 
     };
     let Ok(filter) = crate::query::build(&ctx, &dls) else { return false };
     let probe =
-        TermQuery::new(boostcore::Term::from_field_text(g.fields.id, id), IndexRecordOption::Basic);
+        TermQuery::new(velocore::Term::from_field_text(g.fields.id, id), IndexRecordOption::Basic);
     let q = BooleanQuery::new(vec![
-        (Occur::Must, Box::new(probe) as Box<dyn boostcore::query::Query>),
+        (Occur::Must, Box::new(probe) as Box<dyn velocore::query::Query>),
         (Occur::Must, filter),
     ]);
     searcher.search(&q, &Count).map(|n| n > 0).unwrap_or(false)

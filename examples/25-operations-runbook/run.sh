@@ -12,7 +12,7 @@ CODE=0
 _body=$(mktemp); trap 'rm -f "$_body"' EXIT
 ask() {
   local m=$1 p=$2 b=${3-} ct='application/json'
-  local c=(curl -sS -o "$_body" -w '%{http_code}' -X "$m" "$BS$p")
+  local c=(curl -sS -o "$_body" -w '%{http_code}' -X "$m" "$VS$p")
   [ -n "$AUTH" ] && c+=(-u "$AUTH")
   case "$p" in *_bulk*) ct='application/x-ndjson' ;; esac
   # --data-binary keeps the newlines a bulk body needs, and reads @file as a file
@@ -26,7 +26,7 @@ ask() {
 pick() { python3 -c 'import json,sys; d = json.load(sys.stdin); print(eval(sys.argv[1]))' "$1"; }
 
 # get PATH EXPR -- one value from a GET, without printing the answer
-get() { "${CURL[@]}" "$BS$1" | pick "$2"; }
+get() { "${CURL[@]}" "$VS$1" | pick "$2"; }
 
 # expect WHAT GOT WANT -- a value the step exists to show, checked
 expect() {
@@ -109,7 +109,7 @@ expect "the replica's unassigned.reason" \
 step "and the reason in full -- _cluster/allocation/explain"
 reqf GET /_cluster/allocation/explain requests/03-why-is-this-replica-unassigned.json
 expect "the decider that said no" \
-  "$("${CURL[@]}" -X GET "$BS/_cluster/allocation/explain" -H 'Content-Type: application/json' \
+  "$("${CURL[@]}" -X GET "$VS/_cluster/allocation/explain" -H 'Content-Type: application/json' \
       --data-binary @requests/03-why-is-this-replica-unassigned.json \
     | pick 'd["node_allocation_decisions"][0]["deciders"][0]["decider"]')" same_shard
 note "same_shard: a replica may not share a node with its primary, because then it protects nothing"
@@ -214,7 +214,7 @@ reqf PUT /orders/_settings requests/13-slow-log-thresholds.json
 req GET "/orders/_settings/index.search.slowlog*"
 reqf GET /orders/_search requests/14-a-search-the-slow-log-would-catch.json
 note "with query.debug at 0ms, OpenSearch writes that search to logs/<cluster>_index_search_slowlog.json"
-note "this node writes the same entry to its log output, and to BOOSTSEARCH_LOGS when set -- see docs/troubleshooting.md"
+note "this node writes the same entry to its log output, and to VELOSEARCH_LOGS when set -- see docs/troubleshooting.md"
 reqf PUT /orders/_settings requests/15-slow-log-thresholds-removed.json
 expect "slow log settings left on orders" \
   "$(get '/orders/_settings' 'len(d["orders"]["settings"]["index"].get("search", {}))')" 0
@@ -234,7 +234,7 @@ req GET "/_nodes/stats/indices?filter_path=nodes.*.name,nodes.*.indices.docs,nod
 expect "documents on the node" \
   "$(get '/_nodes/stats/indices' 'list(d["nodes"].values())[0]["indices"]["docs"]["count"]')" 33
 note "there is no JVM here; the process's own memory is what the heap figures would have stood for"
-req GET "/_boostsearch/memory?filter_path=allocator,indices"
+req GET "/_velosearch/memory?filter_path=allocator,indices"
 
 step "is the cluster manager keeping up? -- _cluster/pending_tasks"
 req GET /_cluster/pending_tasks

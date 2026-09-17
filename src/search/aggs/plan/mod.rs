@@ -1,5 +1,5 @@
 //! Who answers which aggregation, and what has to happen to the request
-//! before BoostCore is given it.
+//! before VeloCore is given it.
 
 use super::*;
 use crate::search::*;
@@ -43,9 +43,9 @@ pub(crate) fn count_without_walking(query_json: &Option<Value>) -> bool {
 /// and falls back to walking the matches where it does not.
 pub(crate) fn count_matches(
     searcher: &Searcher,
-    query: &dyn boostcore::query::Query,
-) -> boostcore::Result<usize> {
-    let weight = query.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher))?;
+    query: &dyn velocore::query::Query,
+) -> velocore::Result<usize> {
+    let weight = query.weight(velocore::query::EnableScoring::disabled_from_searcher(searcher))?;
     let mut total = 0usize;
     for reader in searcher.segment_readers() {
         total += weight.count(reader)? as usize;
@@ -55,7 +55,7 @@ pub(crate) fn count_matches(
 
 /// Turn what the shards collected into the answer a client reads.
 ///
-/// The shards hand back intermediate results; combining them is BoostCore's
+/// The shards hand back intermediate results; combining them is VeloCore's
 /// job, and everything after that is this engine's: the shapes OpenSearch
 /// writes a bucket key in, the orders and partitions taken off the request
 /// before it was parsed, and the `meta` a caller attached.
@@ -145,7 +145,7 @@ pub(crate) fn finalise_aggs(
     Ok(out)
 }
 
-/// Run the aggregations BoostCore could not parse, each as its own search.
+/// Run the aggregations VeloCore could not parse, each as its own search.
 pub(crate) fn run_peeled_aggs(
     store: &Store,
     targets: &[String],
@@ -200,7 +200,7 @@ pub(crate) fn plan_aggs(
         // a filter aggregation can carry a terms lookup too
         resolve_terms_lookups(store, a)?;
     }
-    // BoostCore has `filter` but not `filters`; peel those out and run them
+    // VeloCore has `filter` but not `filters`; peel those out and run them
     // ourselves as one filtered search per named bucket
     // sibling pipelines read the finished buckets, so they are held back and
     // computed once the rest of the aggregations have answered
@@ -251,12 +251,12 @@ pub(crate) fn plan_aggs(
             .iter()
             .filter(|(_, def)| {
                 // anything under it that has to be run here drags the whole
-                // aggregation out of BoostCore's hands with it
+                // aggregation out of VeloCore's hands with it
                 peelable(def, store, targets)
                     || def.get("filters").is_some()
                     || def.get("missing").is_some()
                     || def.get("median_absolute_deviation").is_some()
-                    // percentiles answer a different question from BoostCore's
+                    // percentiles answer a different question from VeloCore's
                     // sketch, which is approximate where OpenSearch's is exact
                     // over the handful of values these aggregations see
                     || def.get("percentiles").is_some()
@@ -276,7 +276,7 @@ pub(crate) fn plan_aggs(
                         .and_then(|f| f.as_str())
                         .map(|f| analysed_text_field(store, targets, f))
                         .unwrap_or(false)
-                    // BoostCore's own `filter` agg only speaks its query-string
+                    // VeloCore's own `filter` agg only speaks its query-string
                     // dialect, so run singular filters through our query builder
                     || def.get("filter").is_some()
                     || def.get("composite").is_some()
@@ -305,10 +305,10 @@ pub(crate) fn plan_aggs(
                     || def.get("variable_width_histogram").is_some()
                     // calendar units are not fixed lengths, and a named zone is
                     // a history of offsets; a fixed step over the numbers the
-                    // index holds is a plain histogram, which BoostCore runs
+                    // index holds is a plain histogram, which VeloCore runs
                     || def.get("date_histogram").map(walked_here).unwrap_or(false)
                     // a range field holds no single value to bucket a document
-                    // by, so BoostCore's histogram sees nothing there at all
+                    // by, so VeloCore's histogram sees nothing there at all
                     || def
                         .get("histogram")
                         .and_then(|h| h.get("field"))
@@ -356,7 +356,7 @@ pub(crate) fn combine(main: &Option<Value>, extra: Option<Value>) -> Value {
 }
 
 /// Split sub-aggregations into the ones this engine computes itself and the
-/// ones BoostCore can parse, so each set can take the path that suits it.
+/// ones VeloCore can parse, so each set can take the path that suits it.
 pub(crate) fn split_peelable(
     sub_aggs: &Option<Value>,
     store: &Store,
@@ -388,7 +388,7 @@ pub(crate) fn peelable(def: &Value, store: &Store, targets: &[String]) -> bool {
             .unwrap_or(false)
 }
 
-/// Is this an aggregation BoostCore has no parser for, which has to be computed
+/// Is this an aggregation VeloCore has no parser for, which has to be computed
 /// a bucket at a time here instead?
 pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> bool {
     const OWN: &[&str] = &[
@@ -429,9 +429,9 @@ pub(crate) fn peelable_here(def: &Value, store: &Store, targets: &[String]) -> b
     OWN.iter().any(|k| def.get(k).is_some())
         // `_index` is not a column but a property of the whole index, so a
         // terms over it is counted here whatever it sits under; left to
-        // BoostCore under another bucket, it found no column and no buckets
+        // VeloCore under another bucket, it found no column and no buckets
         || def.pointer("/terms/field").and_then(|f| f.as_str()) == Some("_index")
-        // BoostCore's histogram and range read no `missing`, so the documents
+        // VeloCore's histogram and range read no `missing`, so the documents
         // without a value went uncounted
         || def.pointer("/histogram/missing").is_some()
         || def.pointer("/range/missing").is_some()
@@ -483,7 +483,7 @@ pub(crate) fn fixed_step_ms(spec: &Value) -> Option<i64> {
 /// Turn a fixed-step date histogram into the histogram it is.
 ///
 /// A date is milliseconds in the index, so a step of so many milliseconds over
-/// that column is the same bucketing -- and BoostCore walks it in one pass
+/// that column is the same bucketing -- and VeloCore walks it in one pass
 /// instead of this engine counting each bucket with its own query.
 pub(crate) fn fixed_date_histograms(node: &mut Value, ctx: &Ctx) {
     let Some(map) = node.as_object_mut() else { return };
@@ -528,7 +528,7 @@ pub(crate) fn fixed_date_histograms(node: &mut Value, ctx: &Ctx) {
 }
 
 /// Count the documents a query matches, and run its sub-aggregations --
-/// including the ones BoostCore cannot parse, which are run here against the
+/// including the ones VeloCore cannot parse, which are run here against the
 /// same query rather than handed down.
 pub(crate) fn count_with_sub_aggs(
     store: &Store,
@@ -559,7 +559,7 @@ pub(crate) fn count_with_sub_aggs(
     Ok((count, Some(Value::Object(merged))))
 }
 
-/// What was taken out from under one of BoostCore's bucket aggregations: the
+/// What was taken out from under one of VeloCore's bucket aggregations: the
 /// sub-aggregations run here, a bucket at a time, and the same for the
 /// bucket aggregations still inside it.
 struct HeldBack {
@@ -567,7 +567,7 @@ struct HeldBack {
     inner: Vec<(String, HeldBack)>,
 }
 
-/// Take the sub-aggregations BoostCore cannot run out from under the bucket
+/// Take the sub-aggregations VeloCore cannot run out from under the bucket
 /// aggregations it can, at any depth, and say what was taken from where.
 fn hold_back_peeled(
     node: &mut Value,
@@ -606,7 +606,7 @@ fn hold_back_peeled(
     out
 }
 
-/// The query that picks out the documents of one bucket BoostCore made.
+/// The query that picks out the documents of one bucket VeloCore made.
 ///
 /// A key is enough to name a `terms` bucket, and the edges a `histogram` or a
 /// `range` one; a value the request said to stand in for a missing one also
@@ -730,9 +730,9 @@ fn fill_held_back(
 
 /// Count what a query matches and run the aggregations under it.
 ///
-/// BoostCore runs them, except for what sits under one of its bucket
+/// VeloCore runs them, except for what sits under one of its bucket
 /// aggregations and is not its to run -- a `top_hits`, a `rare_terms`, any of
-/// the aggregations this engine walks itself. Those were handed to BoostCore
+/// the aggregations this engine walks itself. Those were handed to VeloCore
 /// with the rest, which refused a `top_hits` without a `sort` and answered one
 /// with a sort with hits that held no document, so under a `rare_terms` or a
 /// `composite` a `top_hits` did not work at all. They are taken out first and
@@ -744,21 +744,21 @@ pub(crate) fn filtered_count(
     sub_aggs: &Option<Value>,
 ) -> std::result::Result<(u64, Option<Value>), Response> {
     let Some(asked) = sub_aggs.as_ref() else {
-        return boostcore_count(store, targets, query_json, sub_aggs);
+        return velocore_count(store, targets, query_json, sub_aggs);
     };
     let mut plain = asked.clone();
     let held = hold_back_peeled(&mut plain, store, targets);
     if held.is_empty() {
-        return boostcore_count(store, targets, query_json, sub_aggs);
+        return velocore_count(store, targets, query_json, sub_aggs);
     }
-    let (count, mut out) = boostcore_count(store, targets, query_json, &Some(plain))?;
+    let (count, mut out) = velocore_count(store, targets, query_json, &Some(plain))?;
     if let Some(answer) = out.as_mut() {
         fill_held_back(store, targets, query_json, answer, asked, &held)?;
     }
     Ok((count, out))
 }
 
-fn boostcore_count(
+fn velocore_count(
     store: &Store,
     targets: &[String],
     query_json: &Value,

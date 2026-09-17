@@ -1,19 +1,19 @@
 # Performance against OpenSearch
 
 Thirty-four dimensions, the same corpus, the same machine, both engines driven
-by the same client (`tools/bench.py`). BoostSearch is ahead on all 34, on both
+by the same client (`tools/bench.py`). VeloSearch is ahead on all 34, on both
 machines it has been measured on.
 
 ## On a cloud machine, both engines measured the same day
 
 A Google Compute Engine `n2-standard-8`: eight vCPUs, 32 GB, Ubuntu 24.04, an
 SSD. OpenSearch 3.1.0 from `opensearchproject/opensearch:3.1.0` with security
-off, BoostSearch as this repository builds it. Each was measured on 2026-09-17
+off, VeloSearch as this repository builds it. Each was measured on 2026-09-17
 with nothing else running on the machine, five runs each, three query rounds
 per run; the median is shown. The runs are kept in `bench/results/vm-bs-*.json`
 and `bench/results/vm-os-3.1.0-*.json`.
 
-| dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
+| dimension | unit | OpenSearch 3.1.0 | VeloSearch | better by |
 |---|---|---|---|---|
 | queries a second, one client | q/s | 134.9 | 378.7 | +181% |
 | memory, idle | MB | 1,501 | 37.7 | +97% |
@@ -61,14 +61,14 @@ server process's resident set, the container's own figure for OpenSearch.
 - **OpenSearch 3.1.0** was measured once, five runs, on 2026-08-27, from the
   official image with security off; the runs are kept in
   `bench/results/final-os-clean-*.json` and the median of the five is shown.
-- **BoostSearch** is this repository's current build, three runs taken
+- **VeloSearch** is this repository's current build, three runs taken
   2026-09-10 on Apple M4 Max (14 cores); the median is
   shown and kept in `tools/bench_baseline.json`, together with how far the three
   runs spread, dimension by dimension.
 - The corpus is 200,000 web-log documents (`bench/data/http_logs.ndjson`); the
   queries are twelve shapes, each measured with one client and with eight.
 - Memory is the resident set of the one server process: `pid:<n>` for
-  BoostSearch, the container's own figure for OpenSearch.
+  VeloSearch, the container's own figure for OpenSearch.
 
 OpenSearch is not measured again on every change. What every change is held to
 is this repository's own last numbers (`tools/bench_gate.py`, ADR 0004), and
@@ -78,7 +78,7 @@ changes.
 
 ### The table
 
-| dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
+| dimension | unit | OpenSearch 3.1.0 | VeloSearch | better by |
 |---|---|---|---|---|
 | queries a second, one client | q/s | 380.9 | 1,414.8 | +271% |
 | memory, idle | MB | 1,095.2 | 19.0 | +98% |
@@ -116,7 +116,7 @@ changes.
 | bool filter p50 c8 | ms | 5.0 | 3.8 | +25% |
 
 Lower is better for latency and memory, higher for throughput; "better by" is
-the margin in BoostSearch's favour either way. The latency rows named
+the margin in VeloSearch's favour either way. The latency rows named
 `<query> p50 c1` and `c8` are that query shape's median with one client and
 with eight.
 

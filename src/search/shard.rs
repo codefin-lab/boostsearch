@@ -1,4 +1,4 @@
-//! One index's share of a search: the query put to BoostCore, the
+//! One index's share of a search: the query put to VeloCore, the
 //! candidates it gives back, and what it collected on the way.
 
 use super::*;
@@ -12,32 +12,32 @@ use super::*;
 /// needs something to occupy that slot.
 pub(crate) struct MaybeAgg(Option<DistributedAggregationCollector>);
 
-pub(crate) struct MaybeAggSegment(Option<boostcore::aggregation::AggregationSegmentCollector>);
+pub(crate) struct MaybeAggSegment(Option<velocore::aggregation::AggregationSegmentCollector>);
 
 /// Run a shard's search, choosing where the per-segment work goes.
 ///
-/// BoostCore's own `search` hands the segments to the index's shared executor.
+/// VeloCore's own `search` hands the segments to the index's shared executor.
 /// When a query fans out over many indices the outer parallelism already keeps
 /// every core busy, and asking that same pool for per-segment parallelism from
 /// inside it means each shard queues behind the others: measured on two hundred
 /// empty indices, a search that should be free took 147us of elapsed time
 /// waiting. One index at a time still wants the pool -- that is where
 /// per-segment parallelism pays.
-pub(crate) fn search_shard<C: boostcore::collector::Collector>(
+pub(crate) fn search_shard<C: velocore::collector::Collector>(
     searcher: &Searcher,
-    query: &dyn boostcore::query::Query,
+    query: &dyn velocore::query::Query,
     collector: &C,
     fanned_out: bool,
-) -> boostcore::Result<C::Fruit> {
+) -> velocore::Result<C::Fruit> {
     if !fanned_out {
         return searcher.search(query, collector);
     }
     let scoring = if collector.requires_scoring() {
-        boostcore::query::EnableScoring::enabled_from_statistics_provider(searcher, searcher)
+        velocore::query::EnableScoring::enabled_from_statistics_provider(searcher, searcher)
     } else {
-        boostcore::query::EnableScoring::disabled_from_searcher(searcher)
+        velocore::query::EnableScoring::disabled_from_searcher(searcher)
     };
-    searcher.search_with_executor(query, collector, &boostcore::Executor::single_thread(), scoring)
+    searcher.search_with_executor(query, collector, &velocore::Executor::single_thread(), scoring)
 }
 
 // One shard's work touches only its own index, so the fan-out runs across
@@ -60,7 +60,7 @@ pub(crate) struct ShardOut {
 /// How many shards a filter keeps a search to, where it keeps it to some.
 pub(crate) fn narrowed_shard_count(filter: &Value) -> Option<u64> {
     match filter {
-        Value::Object(o) => match o.get("_bs_on_shards") {
+        Value::Object(o) => match o.get("_vs_on_shards") {
             Some(on) => on.get("shards").and_then(|v| v.as_array()).map(|a| a.len() as u64),
             None => o.values().find_map(narrowed_shard_count),
         },
@@ -248,7 +248,7 @@ fn query_shard(
     // as much a part of the question as the query the caller wrote
     let with_alias = crate::security::with_alias_filter(name, query_json.clone());
     let query_json = &with_alias;
-    let q: Box<dyn boostcore::query::Query> = match &query_json {
+    let q: Box<dyn velocore::query::Query> = match &query_json {
         Some(qj) => match crate::query::build(&ctx, qj) {
             Ok(q) => q,
             Err(e) => {
@@ -267,15 +267,15 @@ fn query_shard(
                 return Err(err(StatusCode::BAD_REQUEST, "parsing_exception", why));
             }
         },
-        None => Box::new(boostcore::query::AllQuery),
+        None => Box::new(velocore::query::AllQuery),
     };
     // the caller's document-level security narrows every query on this
     // index; a filter clause, so scores are untouched
-    let q: Box<dyn boostcore::query::Query> = match view.as_ref().and_then(|v| v.dls.clone()) {
+    let q: Box<dyn velocore::query::Query> = match view.as_ref().and_then(|v| v.dls.clone()) {
         Some(dls) => match crate::query::build(&ctx, &dls) {
-            Ok(filter) => Box::new(boostcore::query::BooleanQuery::new(vec![
-                (boostcore::query::Occur::Must, q),
-                (boostcore::query::Occur::Must, filter),
+            Ok(filter) => Box::new(velocore::query::BooleanQuery::new(vec![
+                (velocore::query::Occur::Must, q),
+                (velocore::query::Occur::Must, filter),
             ])),
             Err(e) => {
                 return Err(err(
@@ -289,19 +289,16 @@ fn query_shard(
     };
     // a point in time holds the search to what the index had written when
     // it was opened, which is what makes paging through it stable
-    let q: Box<dyn boostcore::query::Query> = match pit_ceiling.get(name) {
+    let q: Box<dyn velocore::query::Query> = match pit_ceiling.get(name) {
         Some(ceiling) => {
-            let upper = boostcore::Term::from_field_u64(g.fields.seq, *ceiling);
-            let below = boostcore::query::FastFieldRangeQuery::new(
+            let upper = velocore::Term::from_field_u64(g.fields.seq, *ceiling);
+            let below = velocore::query::FastFieldRangeQuery::new(
                 std::ops::Bound::Unbounded,
                 std::ops::Bound::Excluded(upper),
             );
-            Box::new(boostcore::query::BooleanQuery::new(vec![
-                (boostcore::query::Occur::Must, q),
-                (
-                    boostcore::query::Occur::Must,
-                    Box::new(below) as Box<dyn boostcore::query::Query>,
-                ),
+            Box::new(velocore::query::BooleanQuery::new(vec![
+                (velocore::query::Occur::Must, q),
+                (velocore::query::Occur::Must, Box::new(below) as Box<dyn velocore::query::Query>),
             ]))
         }
         None => q,
@@ -458,13 +455,13 @@ fn query_shard(
                 // a script's value is worked out once the candidates are
                 // known; while collecting there is nothing to read
                 _ if k.script.is_some() => SortSource::Column {
-                    name: "_bs_no_such_column".to_string(),
+                    name: "_vs_no_such_column".to_string(),
                     desc: k.desc,
                     mode: k.mode.clone(),
                 },
                 _ if k.nested.is_none() && under_nested(ctx.mapping, &k.field) => {
                     SortSource::Column {
-                        name: "_bs_no_such_column".to_string(),
+                        name: "_vs_no_such_column".to_string(),
                         desc: k.desc,
                         mode: k.mode.clone(),
                     }
@@ -581,15 +578,15 @@ fn query_shard(
     }))
 }
 
-impl boostcore::collector::Collector for MaybeAgg {
+impl velocore::collector::Collector for MaybeAgg {
     type Fruit = Option<IntermediateAggregationResults>;
     type Child = MaybeAggSegment;
 
     fn for_segment(
         &self,
-        ord: boostcore::SegmentOrdinal,
-        reader: &boostcore::SegmentReader,
-    ) -> boostcore::Result<Self::Child> {
+        ord: velocore::SegmentOrdinal,
+        reader: &velocore::SegmentReader,
+    ) -> velocore::Result<Self::Child> {
         Ok(MaybeAggSegment(match &self.0 {
             Some(c) => Some(c.for_segment(ord, reader)?),
             None => None,
@@ -602,10 +599,10 @@ impl boostcore::collector::Collector for MaybeAgg {
 
     fn merge_fruits(
         &self,
-        segment_fruits: Vec<Option<boostcore::Result<IntermediateAggregationResults>>>,
-    ) -> boostcore::Result<Self::Fruit> {
+        segment_fruits: Vec<Option<velocore::Result<IntermediateAggregationResults>>>,
+    ) -> velocore::Result<Self::Fruit> {
         let Some(inner) = &self.0 else { return Ok(None) };
-        let present: Vec<boostcore::Result<IntermediateAggregationResults>> =
+        let present: Vec<velocore::Result<IntermediateAggregationResults>> =
             segment_fruits.into_iter().flatten().collect();
         if present.is_empty() {
             return Ok(None);
@@ -613,19 +610,19 @@ impl boostcore::collector::Collector for MaybeAgg {
         inner.merge_fruits(present).map(Some)
     }
 }
-impl boostcore::collector::SegmentCollector for MaybeAggSegment {
-    type Fruit = Option<boostcore::Result<IntermediateAggregationResults>>;
+impl velocore::collector::SegmentCollector for MaybeAggSegment {
+    type Fruit = Option<velocore::Result<IntermediateAggregationResults>>;
 
-    fn collect(&mut self, doc: boostcore::DocId, score: boostcore::Score) {
+    fn collect(&mut self, doc: velocore::DocId, score: velocore::Score) {
         if let Some(c) = &mut self.0 {
             c.collect(doc, score);
         }
     }
 
-    /// Forwarding this matters: BoostCore's aggregation collects a block at a
+    /// Forwarding this matters: VeloCore's aggregation collects a block at a
     /// time, and the default implementation would unroll it back into one call
     /// per document.
-    fn collect_block(&mut self, docs: &[boostcore::DocId]) {
+    fn collect_block(&mut self, docs: &[velocore::DocId]) {
         if let Some(c) = &mut self.0 {
             c.collect_block(docs);
         }

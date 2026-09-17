@@ -9,7 +9,7 @@ req GET "/_snapshot" || true
 gone "/_snapshot/$REPO"
 req PUT "/_snapshot/$REPO" '{ "type": "fs", "settings": { "location": "'"$REPO"'", "compress": true } }'
 note "if this fails with a repository_exception, start the node with"
-note "  BOOSTSEARCH_PATH_REPO=/some/writable/dir"
+note "  VELOSEARCH_PATH_REPO=/some/writable/dir"
 
 step "the repository answers, and is writable by every node"
 req POST "/_snapshot/$REPO/_verify"
@@ -31,8 +31,8 @@ PY
 ndjson "/$IDX/_bulk?refresh=true" /tmp/ledger.ndjson > /dev/null
 expect_docs "$IDX" 500 "ledger entries"
 quiet POST "/other/_doc?refresh=true" '{ "unrelated": true }'
-BEFORE=$("${CURL[@]}" "$BS/$IDX/_count" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')
-SUM_BEFORE=$("${CURL[@]}" -X POST "$BS/$IDX/_search" -H 'Content-Type: application/json' \
+BEFORE=$("${CURL[@]}" "$VS/$IDX/_count" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')
+SUM_BEFORE=$("${CURL[@]}" -X POST "$VS/$IDX/_search" -H 'Content-Type: application/json' \
   -d '{"size":0,"aggs":{"t":{"sum":{"field":"amount"}}}}' \
   | python3 -c 'import json,sys;print(round(json.load(sys.stdin)["aggregations"]["t"]["value"],2))')
 note "before the snapshot: $BEFORE documents, total $SUM_BEFORE"
@@ -58,8 +58,8 @@ req POST "/_snapshot/$REPO/nightly-1/_restore?wait_for_completion=true" '{
   "index_settings": { "index.number_of_replicas": 0 }
 }'
 green "$IDX-restored"
-AFTER=$("${CURL[@]}" "$BS/$IDX-restored/_count" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')
-SUM_AFTER=$("${CURL[@]}" -X POST "$BS/$IDX-restored/_search" -H 'Content-Type: application/json' \
+AFTER=$("${CURL[@]}" "$VS/$IDX-restored/_count" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')
+SUM_AFTER=$("${CURL[@]}" -X POST "$VS/$IDX-restored/_search" -H 'Content-Type: application/json' \
   -d '{"size":0,"aggs":{"t":{"sum":{"field":"amount"}}}}' \
   | python3 -c 'import json,sys;print(round(json.load(sys.stdin)["aggregations"]["t"]["value"],2))')
 note "restored: $AFTER documents, total $SUM_AFTER"

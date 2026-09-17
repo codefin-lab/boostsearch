@@ -43,7 +43,7 @@ resource "google_storage_bucket" "results" {
 # else in the project
 resource "google_service_account" "bench" {
   account_id   = "${var.name}-${random_id.run.hex}"
-  display_name = "boostsearch bench runner"
+  display_name = "velosearch bench runner"
 }
 
 resource "google_storage_bucket_iam_member" "writer" {
@@ -92,7 +92,7 @@ resource "google_compute_instance" "bench" {
   })
 
   labels = {
-    purpose = "boostsearch-bench"
+    purpose = "velosearch-bench"
   }
 
   depends_on = [google_storage_bucket_iam_member.writer]

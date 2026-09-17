@@ -391,9 +391,9 @@ fn interval_ms(hist: &Value) -> i64 {
         .unwrap_or(86_400_000)
 }
 
-fn to_datetime(ms: i64) -> boostcore::time::OffsetDateTime {
-    boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
-        .unwrap_or(boostcore::time::OffsetDateTime::UNIX_EPOCH)
+fn to_datetime(ms: i64) -> velocore::time::OffsetDateTime {
+    velocore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+        .unwrap_or(velocore::time::OffsetDateTime::UNIX_EPOCH)
 }
 
 fn zero_stats() -> Value {

@@ -27,13 +27,13 @@ variable "disk_gb" {
 
 variable "name" {
   type    = string
-  default = "boostsearch-bench"
+  default = "velosearch-bench"
 }
 
 variable "source_url" {
-  description = "where the VM clones BoostSearch from"
+  description = "where the VM clones VeloSearch from"
   type        = string
-  default     = "https://github.com/codefin-lab/boostsearch"
+  default     = "https://github.com/codefin-lab/velosearch"
 }
 
 variable "source_ref" {
@@ -47,7 +47,7 @@ variable "opensearch_image" {
   default = "opensearchproject/opensearch:3.1.0"
 }
 
-# the same heap OpenSearch's own docs give a 64 GiB machine; BoostSearch
+# the same heap OpenSearch's own docs give a 64 GiB machine; VeloSearch
 # takes what it needs
 variable "java_heap" {
   type    = string

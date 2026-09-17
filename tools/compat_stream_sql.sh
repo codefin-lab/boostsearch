@@ -12,7 +12,7 @@
 #   docker run -d --name os-ref -p 9251:9200 \
 #     -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
 #     opensearchproject/opensearch:3.1.0
-#   BOOST_PORT=9252 tools/gate_node.sh &
+#   VELO_PORT=9252 tools/gate_node.sh &
 #   tools/compat_stream_sql.sh
 set -e
 A=${BENCH_A:-http://127.0.0.1:9251}

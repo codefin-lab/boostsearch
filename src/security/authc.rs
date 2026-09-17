@@ -712,7 +712,7 @@ impl OpenIdSettings {
         match self.fetch_keys_inner() {
             Ok(k) => Some(k),
             Err(e) => {
-                if std::env::var("BOOSTSEARCH_AUTH_DEBUG").is_ok() {
+                if std::env::var("VELOSEARCH_AUTH_DEBUG").is_ok() {
                     eprintln!("oidc: fetch: {e}");
                 }
                 None
@@ -843,7 +843,7 @@ impl OpenIdSettings {
         let fetched = match self.fetch_keys() {
             Some(f) => f,
             None => {
-                if std::env::var("BOOSTSEARCH_AUTH_DEBUG").is_ok() {
+                if std::env::var("VELOSEARCH_AUTH_DEBUG").is_ok() {
                     eprintln!(
                         "oidc: key set could not be fetched from {:?} / {:?}",
                         self.connect_url, self.jwks_uri
@@ -869,7 +869,7 @@ impl OpenIdSettings {
 
     fn credentials(&self, p: &Presented<'_>) -> Option<Credentials> {
         let token = self.token(p)?;
-        let debug = std::env::var("BOOSTSEARCH_AUTH_DEBUG").is_ok();
+        let debug = std::env::var("VELOSEARCH_AUTH_DEBUG").is_ok();
         let header = match jsonwebtoken::decode_header(&token) {
             Ok(h) => h,
             Err(e) => {

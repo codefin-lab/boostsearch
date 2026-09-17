@@ -8,10 +8,10 @@ use anyhow::Result;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use boostcore::TantivyDocument;
-use boostcore::schema::Value as _;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use velocore::TantivyDocument;
+use velocore::schema::Value as _;
 
 mod alias;
 mod async_search;

@@ -29,9 +29,9 @@ say "fetching ${source_url} at ${source_ref}"
 git clone --depth 1 --branch ${source_ref} ${source_url} /opt/bs || {
   git clone ${source_url} /opt/bs && git -C /opt/bs checkout ${source_ref}; }
 cd /opt/bs
-say "building boostsearch (this is the slow part)"
-docker build -q -t boostsearch . 
-docker run -d --name bs -p 127.0.0.1:9202:9200 boostsearch
+say "building velosearch (this is the slow part)"
+docker build -q -t velosearch . 
+docker run -d --name bs -p 127.0.0.1:9202:9200 velosearch
 
 say "generating ${docs} documents"
 python3 tools/gen_dataset.py --docs ${docs} --out /tmp/bench_logs.ndjson
@@ -42,7 +42,7 @@ for i in $(seq 1 120); do
   sleep 5
 done
 curl -sf http://127.0.0.1:9201/ >/dev/null || fail "OpenSearch did not come up"
-curl -sf http://127.0.0.1:9202/ >/dev/null || fail "BoostSearch did not come up"
+curl -sf http://127.0.0.1:9202/ >/dev/null || fail "VeloSearch did not come up"
 
 say "the machine: $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GiB"
 grep -m1 'model name' /proc/cpuinfo || true

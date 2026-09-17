@@ -54,7 +54,7 @@ note "can be skipped or repeated at a page boundary"
 step "the problem search_after alone does not solve: the index moves under you"
 note "a document written between page 3 and page 4 shifts everything after it"
 note "a point in time freezes the view"
-PIT=$("${CURL[@]}" -X POST "$BS/$IDX/_search/point_in_time?keep_alive=2m" \
+PIT=$("${CURL[@]}" -X POST "$VS/$IDX/_search/point_in_time?keep_alive=2m" \
       | python3 -c 'import json,sys;print(json.load(sys.stdin).get("pit_id",""))')
 note "pit id: ${PIT:0:40}..."
 
@@ -67,7 +67,7 @@ for page in 1 2 3; do
     BODY="{\"size\":2,\"_source\":[\"seq\"],\"pit\":{\"id\":\"$PIT\",\"keep_alive\":\"2m\"},\"sort\":[{\"seq\":\"asc\"}],\"search_after\":$LAST,\"track_total_hits\":false}"
   fi
   note "--- page $page"
-  OUT=$("${CURL[@]}" -X POST "$BS/_search" -H 'Content-Type: application/json' -d "$BODY")
+  OUT=$("${CURL[@]}" -X POST "$VS/_search" -H 'Content-Type: application/json' -d "$BODY")
   echo "$OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); print([h["_source"]["seq"] for h in d["hits"]["hits"]])'
   LAST=$(echo "$OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d["hits"]["hits"]; print(json.dumps(h[-1]["sort"]) if h else "")')
   # a write between pages, which the frozen view must not see
@@ -80,13 +80,13 @@ step "give the point in time back"
 req DELETE "/_search/point_in_time" "{ \"pit_id\": \"$PIT\" }"
 
 step "scroll: the older way, still the right one for a full export"
-SCROLL=$("${CURL[@]}" -X POST "$BS/$IDX/_search?scroll=1m" -H 'Content-Type: application/json' \
+SCROLL=$("${CURL[@]}" -X POST "$VS/$IDX/_search?scroll=1m" -H 'Content-Type: application/json' \
   -d '{"size":1000,"_source":["seq"],"query":{"term":{"kind":"buy"}},"sort":["_doc"]}')
 SID=$(echo "$SCROLL" | python3 -c 'import json,sys;print(json.load(sys.stdin)["_scroll_id"])')
 TOTAL=$(echo "$SCROLL" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["hits"]["hits"]))')
 note "first batch: $TOTAL"
 for _ in 1 2; do
-  NEXT=$("${CURL[@]}" -X POST "$BS/_search/scroll" -H 'Content-Type: application/json' \
+  NEXT=$("${CURL[@]}" -X POST "$VS/_search/scroll" -H 'Content-Type: application/json' \
     -d "{\"scroll\":\"1m\",\"scroll_id\":\"$SID\"}")
   N=$(echo "$NEXT" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["hits"]["hits"]))')
   SID=$(echo "$NEXT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["_scroll_id"])')

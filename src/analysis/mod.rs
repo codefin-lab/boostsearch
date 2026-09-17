@@ -6,7 +6,7 @@
 //! never meet.
 //!
 //! Everything here is built from what the index settings say, and handed to
-//! BoostCore as a `TextAnalyzer` under the name the mapping uses.
+//! VeloCore as a `TextAnalyzer` under the name the mapping uses.
 //!
 //! A chain becomes a `TextAnalyzer` -- the whole of it, tokenizer and filters
 //! alike -- so that a document and a query are cut by the same code, and the
@@ -25,14 +25,14 @@ mod unicode_set;
 
 use std::collections::HashMap;
 
-use boostcore::tokenizer::{
+use serde_json::{Value, json};
+use velocore::tokenizer::{
     AsciiFoldingFilter, Language, NgramTokenizer, RawTokenizer, RegexTokenizer, RemoveLongFilter,
     SimpleTokenizer, Stemmer, TextAnalyzer, Token as CoreToken, TokenStream, Tokenizer,
     WhitespaceTokenizer,
 };
-use serde_json::{Value, json};
 
-/// The languages OpenSearch names, as BoostCore knows them.
+/// The languages OpenSearch names, as VeloCore knows them.
 fn language(name: &str) -> Option<Language> {
     Some(match name.to_ascii_lowercase().as_str() {
         "arabic" => Language::Arabic,
@@ -737,8 +737,8 @@ impl Chain {
         self.tokens(text).into_iter().map(|(t, _, _, _, _)| t).collect()
     }
 
-    /// The part of the chain BoostCore can run itself.
-    pub fn boostcore_analyzer(&self) -> TextAnalyzer {
+    /// The part of the chain VeloCore can run itself.
+    pub fn velocore_analyzer(&self) -> TextAnalyzer {
         let base = match &self.source {
             Source::Standard => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
             // `letter` keeps runs of letters and nothing else, so it is cut
@@ -748,7 +748,7 @@ impl Chain {
             }
             Source::Whitespace => TextAnalyzer::builder(WhitespaceTokenizer::default()).dynamic(),
             Source::Keyword => TextAnalyzer::builder(RawTokenizer::default()).dynamic(),
-            // the sources below are cut here rather than by BoostCore; the
+            // the sources below are cut here rather than by VeloCore; the
             // text arrives whole and `tokens` splits it
             Source::PatternSplit(_)
             | Source::Classic
@@ -891,7 +891,7 @@ impl Chain {
                 .map(|(i, t)| (t, i, 0, text.len(), 1))
                 .collect(),
             _ => {
-                let mut analyzer = self.boostcore_analyzer();
+                let mut analyzer = self.velocore_analyzer();
                 let mut stream = analyzer.token_stream(text);
                 let mut out = Vec::new();
                 while stream.advance() {
@@ -909,9 +909,9 @@ impl Chain {
     }
 }
 
-/// A whole chain, as something BoostCore can be handed.
+/// A whole chain, as something VeloCore can be handed.
 ///
-/// The tokens are those of `Chain::tokens`: the source runs inside BoostCore
+/// The tokens are those of `Chain::tokens`: the source runs inside VeloCore
 /// and the steps here, in the order OpenSearch writes them. Cutting a
 /// document and cutting the query that looks for it is then the same code.
 #[derive(Clone, Debug)]
@@ -1082,7 +1082,7 @@ fn path_hierarchy(text: &str, delimiter: char, replacement: char) -> Vec<Token> 
     out
 }
 
-/// Steps BoostCore has no filter for, or where OpenSearch's order differs.
+/// Steps VeloCore has no filter for, or where OpenSearch's order differs.
 /// A script over one token at a time, answering whether it holds: the
 /// token is `token`, with its term, position, offsets and the rest.
 fn token_judge(script: &str) -> Option<TokenJudge> {
@@ -1196,7 +1196,7 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
                 "spanish_light" | "light_spanish" => return word_by_word(&stem::spanish_light),
                 "greek" => return word_by_word(&stem::greek),
                 "galician" => return word_by_word(&rslp::galician),
-                // the algorithms Snowball defines that BoostCore does not
+                // the algorithms Snowball defines that VeloCore does not
                 // carry, generated from the definitions themselves
                 other @ ("catalan" | "basque" | "irish" | "lithuanian" | "estonian"
                 | "armenian" | "porter" | "finnish") => {
@@ -1228,7 +1228,7 @@ fn apply_step(step: &Step, tokens: Vec<Token>, held: &mut Held) -> Vec<Token> {
                 }
             };
             let its_own = script_of(&lang.to_ascii_lowercase());
-            // the eighteen languages BoostCore carries an algorithm for
+            // the eighteen languages VeloCore carries an algorithm for
             if let Some(l) = language(lang) {
                 let mut analyzer =
                     TextAnalyzer::builder(RawTokenizer::default()).filter(Stemmer::new(l)).build();
@@ -3975,7 +3975,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
             annotated: false,
         },
         other => {
-            // a language with a light stemmer of its own, or one BoostCore has
+            // a language with a light stemmer of its own, or one VeloCore has
             // an algorithm for
             if !KNOWN_LANGUAGES.contains(&other) && language(other).is_none() {
                 return None;
@@ -3985,7 +3985,7 @@ pub fn builtin(name: &str) -> Option<Chain> {
     })
 }
 
-/// The languages named by an analyzer, beyond the ones BoostCore stems.
+/// The languages named by an analyzer, beyond the ones VeloCore stems.
 const KNOWN_LANGUAGES: &[&str] = &[
     "armenian",
     "basque",

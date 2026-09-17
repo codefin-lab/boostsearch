@@ -6,13 +6,13 @@
 //! The document frequencies are blended to the largest among them, so a rare
 //! misspelling does not outscore the word it stands for. Every word within
 //! reach had scored the same here, however near it was.
-use boostcore::Searcher;
-use boostcore::query::{
+use std::collections::{BTreeMap, HashSet};
+use velocore::Searcher;
+use velocore::query::{
     Bm25StatisticsProvider, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, FuzzyTermQuery,
     Occur, Query, TermQuery, Weight,
 };
-use boostcore::schema::{Field, IndexRecordOption, Term};
-use std::collections::{BTreeMap, HashSet};
+use velocore::schema::{Field, IndexRecordOption, Term};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ScoredFuzzy {
@@ -49,12 +49,12 @@ impl ScoredFuzzy {
 
     /// The indexed words within reach, nearest first, without their weights:
     /// what a `span_multi` over a fuzzy term rewrites into.
-    pub(crate) fn words(&self, searcher: &Searcher) -> boostcore::Result<Vec<Term>> {
+    pub(crate) fn words(&self, searcher: &Searcher) -> velocore::Result<Vec<Term>> {
         Ok(self.expand(searcher)?.into_iter().map(|(term, _)| term).collect())
     }
 
     /// The indexed words within reach, with the weight each is given.
-    fn expand(&self, searcher: &Searcher) -> boostcore::Result<Vec<(Term, f32)>> {
+    fn expand(&self, searcher: &Searcher) -> velocore::Result<Vec<(Term, f32)>> {
         let value = self.term.serialized_value_bytes();
         let head_len = value.len().saturating_sub(self.text.len());
         // the words that share the path, and the fixed prefix if one is asked
@@ -116,21 +116,21 @@ struct Blended<'a> {
 }
 
 impl Bm25StatisticsProvider for Blended<'_> {
-    fn total_num_tokens(&self, field: Field) -> boostcore::Result<u64> {
+    fn total_num_tokens(&self, field: Field) -> velocore::Result<u64> {
         self.inner.total_num_tokens(field)
     }
 
-    fn total_num_docs(&self) -> boostcore::Result<u64> {
+    fn total_num_docs(&self) -> velocore::Result<u64> {
         self.inner.total_num_docs()
     }
 
-    fn doc_freq(&self, term: &Term) -> boostcore::Result<u64> {
+    fn doc_freq(&self, term: &Term) -> velocore::Result<u64> {
         if self.terms.contains(term) { Ok(self.doc_freq) } else { self.inner.doc_freq(term) }
     }
 }
 
 impl Query for ScoredFuzzy {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let Some(searcher) = scoring.searcher() else {
             // with no index to read the words from, the plain automaton
             return FuzzyTermQuery::new(self.term.clone(), self.distance, self.transpositions)

@@ -1,25 +1,25 @@
-# BoostCore
+# VeloCore
 
-BoostCore is the search library this is built on. It is a fork of
+VeloCore is the search library this is built on. It is a fork of
 [tantivy](https://github.com/quickwit-oss/tantivy) **0.26.1** (upstream tag
 `0.26.1`), and it lives in its own repository:
-[codefin-lab/boostcore](https://github.com/codefin-lab/boostcore).
+[codefin-lab/velocore](https://github.com/codefin-lab/velocore).
 
 `Cargo.toml` names it as a git dependency pinned to a commit, so a build is the
 same build tomorrow. To work on the fork and this together, clone it beside
 this repo and add:
 
 ```toml
-[patch."https://github.com/codefin-lab/boostcore"]
-boostcore = { path = "../boostcore" }
-boostcore-common = { path = "../boostcore/common" }
+[patch."https://github.com/codefin-lab/velocore"]
+velocore = { path = "../velocore" }
+velocore-common = { path = "../velocore/common" }
 ```
 
 Once the crates are on crates.io the dependency becomes a version instead.
 
 ## Why it is a fork
 
-BoostSearch has to behave the way OpenSearch behaves, and some of that is decided
+VeloSearch has to behave the way OpenSearch behaves, and some of that is decided
 below the query layer -- in how a segment is written and how a document is
 scored. Those are one-line differences in the engine and unreachable from
 outside it. A fork turns "we cannot do that" into a patch, and leaves room to
@@ -34,23 +34,23 @@ called tantivy any more:
 
 | upstream | here |
 | --- | --- |
-| `tantivy` | `boostcore` |
-| `tantivy-bitpacker` | `boostcore-bitpacker` |
-| `tantivy-columnar` | `boostcore-columnar` |
-| `tantivy-common` | `boostcore-common` |
-| `tantivy-query-grammar` | `boostcore-query-grammar` |
-| `tantivy-sstable` | `boostcore-sstable` |
-| `tantivy-stacker` | `boostcore-stacker` |
-| `tantivy-tokenizer-api` | `boostcore-tokenizer-api` |
+| `tantivy` | `velocore` |
+| `tantivy-bitpacker` | `velocore-bitpacker` |
+| `tantivy-columnar` | `velocore-columnar` |
+| `tantivy-common` | `velocore-common` |
+| `tantivy-query-grammar` | `velocore-query-grammar` |
+| `tantivy-sstable` | `velocore-sstable` |
+| `tantivy-stacker` | `velocore-stacker` |
+| `tantivy-tokenizer-api` | `velocore-tokenizer-api` |
 
-`tantivy-fst` is still used from crates.io, aliased to `boostcore-fst`.
+`tantivy-fst` is still used from crates.io, aliased to `velocore-fst`.
 
 The upstream benchmark corpora (`hdfs.json`, `gh.json`, `wiki.json`,
 `alice.txt` -- 24 MB) and the `.git` directory were dropped.
 
 ### Field norms for JSON fields
 
-boostsearch stores every document in one JSON field (`_dyn`, tokenized, and
+velosearch stores every document in one JSON field (`_dyn`, tokenized, and
 `_raw`, not). Upstream never records a field norm for a JSON field, so BM25
 sees every document as the same length and scores by term frequency alone.
 Ordering then disagrees with OpenSearch wherever length is what separates two
@@ -65,7 +65,7 @@ Three changes fix that:
 - `src/indexer/segment_writer.rs` -- the `JsonObject` branch records that count
   as the document's field norm, as the text branch already does.
 
-The length is the whole JSON field, which for boostsearch is the whole document.
+The length is the whole JSON field, which for velosearch is the whole document.
 Lucene's norm is per field, so a document whose other fields are long still
 scores lower here than it would there; per-path norms are the next step.
 

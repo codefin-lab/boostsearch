@@ -68,7 +68,7 @@ pub(crate) fn run_rare_terms_agg(
     let include = listed("include");
     let exclude = listed("exclude");
     let mut node = json!({"terms": terms.clone()});
-    // what BoostCore cannot run is run once the rare buckets are known, rather
+    // what VeloCore cannot run is run once the rare buckets are known, rather
     // than in every bucket of the terms aggregation they are picked from
     let (peeled_subs, plain_subs) = split_peelable(&sub_aggs, store, targets);
     if let Some(sa) = plain_subs {

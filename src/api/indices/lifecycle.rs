@@ -146,7 +146,7 @@ pub async fn force_merge(
                 // to go, even when it is already the only one: the reference
                 // does, and a segment left alone went on reporting a deleted
                 // document that `_stats` had stopped counting.
-                let batch: Vec<boostcore::index::SegmentId> = if expunge
+                let batch: Vec<velocore::index::SegmentId> = if expunge
                     || metas.len() <= max_segments
                 {
                     if !(expunge || max_segments == 1) {
@@ -164,7 +164,7 @@ pub async fn force_merge(
                         with_deletes
                     }
                 } else {
-                    // merge the whole set down in one step; BoostCore handles
+                    // merge the whole set down in one step; VeloCore handles
                     // the rest
                     let take = metas.len() - max_segments + 1;
                     metas.iter().take(take).map(|m| m.id()).collect()
@@ -211,7 +211,7 @@ pub async fn force_merge(
 
 /// `_segments` -- what each shard is made of.
 ///
-/// One shard per index here, and BoostCore names its segments by ordinal, so
+/// One shard per index here, and VeloCore names its segments by ordinal, so
 /// they are reported as `_0`, `_1` and so on to match the shape the API has.
 pub async fn segments(
     State(store): State<Store>,
@@ -273,7 +273,7 @@ pub async fn segments(
         indices.insert(
             n.clone(),
             json!({"shards": {"0": [{
-                "routing": {"state": "STARTED", "primary": true, "node": "boostsearch"},
+                "routing": {"state": "STARTED", "primary": true, "node": "velosearch"},
                 "num_committed_segments": segs.len(),
                 "num_search_segments": segs.len(),
                 "segments": Value::Object(segs),

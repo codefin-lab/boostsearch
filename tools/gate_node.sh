@@ -10,41 +10,41 @@
 # this is the one way to start it.
 #
 # One suite is written against a cluster with no ingest node, which is a
-# different cluster rather than a different request -- BOOST_ROLES starts one.
+# different cluster rather than a different request -- VELO_ROLES starts one.
 #
-# The transport port follows the http one (+100) unless BOOST_TRANSPORT says
+# The transport port follows the http one (+100) unless VELO_TRANSPORT says
 # otherwise: every gate node used to take 9300, so two of them could not run
 # at once and the second died with "Address already in use".
 #
 #   tools/gate_node.sh            starts it on 9213
-#   BOOST_PORT=9214 tools/gate_node.sh
-#   BOOST_PORT=9214 BOOST_DATA=/tmp/boost-noingest \
-#     BOOST_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh
+#   VELO_PORT=9214 tools/gate_node.sh
+#   VELO_PORT=9214 VELO_DATA=/tmp/velo-noingest \
+#     VELO_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh
 set -e
-PORT=${BOOST_PORT:-9213}
+PORT=${VELO_PORT:-9213}
 # The geoip databases and the Beider-Morse rule files are somebody else's data
 # and are not in this repository (docs/geoip.md, docs/phonetic.md). They used
 # to be looked for in /tmp, which a restart empties: the suites that read them
 # then failed for want of a file rather than for anything the code does. They
-# live under the home directory now, and BOOST_FIXTURES says where.
-FIXTURES=${BOOST_FIXTURES:-$HOME/boost-fixtures}
-DATA=${BOOST_DATA:-/tmp/boost-gate}
-REPO=${BOOST_URL_REPO:-/tmp/boost-url-repo}
-FIXTURE=${BOOST_URL_FIXTURE_PORT:-9280}
+# live under the home directory now, and VELO_FIXTURES says where.
+FIXTURES=${VELO_FIXTURES:-$HOME/velo-fixtures}
+DATA=${VELO_DATA:-/tmp/velo-gate}
+REPO=${VELO_URL_REPO:-/tmp/velo-url-repo}
+FIXTURE=${VELO_URL_FIXTURE_PORT:-9280}
 rm -rf "$DATA" "$REPO"
 # the user-agent suite names a regex file its build copies into the node's
 # config; the file is in the OpenSearch tree, so it is copied from there
 mkdir -p "$DATA/config/ingest-user-agent"
 cp study/OpenSearch/modules/ingest-user-agent/src/test/test-regexes.yml \
    "$DATA/config/ingest-user-agent/" 2>/dev/null || true
-BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
-BOOSTSEARCH_TRANSPORT_PORT=${BOOST_TRANSPORT:-$((PORT + 100))} \
-BOOSTSEARCH_DATA="$DATA" \
-BOOSTSEARCH_NODE_ATTRS=testattr=test \
-BOOSTSEARCH_GEOIP_PATH=${BOOST_GEOIP:-$FIXTURES/geoip-db} \
-BOOSTSEARCH_PHONETIC_RULES=${BOOST_PHONETIC:-$FIXTURES/phonetic-rules} \
-BOOSTSEARCH_PATH_REPO="$REPO" \
-BOOSTSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:$FIXTURE*" \
-BOOSTSEARCH_REINDEX_ALLOWLIST="127.0.0.1:*" \
-BOOSTSEARCH_NODE_ROLES="${BOOST_ROLES:-cluster_manager,data,ingest,remote_cluster_client}" \
-exec target/release/boostsearch
+VELOSEARCH_ADDR=127.0.0.1:$PORT \
+VELOSEARCH_TRANSPORT_PORT=${VELO_TRANSPORT:-$((PORT + 100))} \
+VELOSEARCH_DATA="$DATA" \
+VELOSEARCH_NODE_ATTRS=testattr=test \
+VELOSEARCH_GEOIP_PATH=${VELO_GEOIP:-$FIXTURES/geoip-db} \
+VELOSEARCH_PHONETIC_RULES=${VELO_PHONETIC:-$FIXTURES/phonetic-rules} \
+VELOSEARCH_PATH_REPO="$REPO" \
+VELOSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:$FIXTURE*" \
+VELOSEARCH_REINDEX_ALLOWLIST="127.0.0.1:*" \
+VELOSEARCH_NODE_ROLES="${VELO_ROLES:-cluster_manager,data,ingest,remote_cluster_client}" \
+exec target/release/velosearch

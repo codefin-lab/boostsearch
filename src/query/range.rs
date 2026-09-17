@@ -268,8 +268,8 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 
     // only build the typed variants this field has actually held; each extra
     // variant is a separate range scan unioned over the whole segment
-    // BOOSTSEARCH_NO_KIND_NARROW=1 disables the narrowing, for A/B runs
-    let narrowing_on = ctx.kinds_complete && std::env::var("BOOSTSEARCH_NO_KIND_NARROW").is_err();
+    // VELOSEARCH_NO_KIND_NARROW=1 disables the narrowing, for A/B runs
+    let narrowing_on = ctx.kinds_complete && std::env::var("VELOSEARCH_NO_KIND_NARROW").is_err();
     let types: Vec<Type> = match ctx.observed_kinds.get(&field).filter(|_| narrowing_on) {
         Some(&kinds) if kinds != 0 => {
             let narrowed: Vec<Type> = types
@@ -340,7 +340,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
     // two spellings of the value
     if types.len() == 1
         && flat_bounds.is_none()
-        && std::env::var("BOOSTSEARCH_NO_BLOCK_RANGE").is_err()
+        && std::env::var("VELOSEARCH_NO_BLOCK_RANGE").is_err()
         && let Some(q) =
             block_range_query(ctx, &field, types[0], lower.as_ref(), upper.as_ref(), &general)
     {
@@ -355,7 +355,7 @@ pub(crate) fn build_range(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
 /// exclusive float bound, say -- so the caller falls back to the general path
 /// rather than answering a slightly different question.
 pub(crate) fn u64_bound(ty: Type, b: Option<&(Value, bool)>, is_lower: bool) -> Option<u64> {
-    use boostcore::columnar::MonotonicallyMappableToU64;
+    use velocore::columnar::MonotonicallyMappableToU64;
     let Some((v, inclusive)) = b else {
         return Some(if is_lower { u64::MIN } else { u64::MAX });
     };
@@ -394,7 +394,7 @@ pub(crate) fn block_range_query(
     upper: Option<&(Value, bool)>,
     general: &dyn Query,
 ) -> Option<Box<dyn Query>> {
-    use boostcore::columnar::ColumnType;
+    use velocore::columnar::ColumnType;
     let column_type = match ty {
         Type::I64 => ColumnType::I64,
         Type::U64 => ColumnType::U64,
@@ -483,7 +483,7 @@ fn seq_no_range(ctx: &Ctx, spec: &Value) -> Box<dyn Query> {
     };
     // a bound below zero reaches every document, and one that excludes
     // everything below zero as well
-    let term = |n: i64| boostcore::Term::from_field_u64(ctx.fields.seq, n.max(0) as u64);
+    let term = |n: i64| velocore::Term::from_field_u64(ctx.fields.seq, n.max(0) as u64);
     let lower = match (number("gte").or_else(|| number("from")), number("gt")) {
         (Some(n), _) if n <= 0 => Bound::Unbounded,
         (Some(n), _) => Bound::Included(term(n)),
@@ -492,11 +492,11 @@ fn seq_no_range(ctx: &Ctx, spec: &Value) -> Box<dyn Query> {
         _ => Bound::Unbounded,
     };
     let upper = match (number("lte").or_else(|| number("to")), number("lt")) {
-        (Some(n), _) if n < 0 => return Box::new(boostcore::query::EmptyQuery),
+        (Some(n), _) if n < 0 => return Box::new(velocore::query::EmptyQuery),
         (Some(n), _) => Bound::Included(term(n)),
-        (None, Some(n)) if n <= 0 => return Box::new(boostcore::query::EmptyQuery),
+        (None, Some(n)) if n <= 0 => return Box::new(velocore::query::EmptyQuery),
         (None, Some(n)) => Bound::Excluded(term(n)),
         _ => Bound::Unbounded,
     };
-    Box::new(boostcore::query::FastFieldRangeQuery::new(lower, upper))
+    Box::new(velocore::query::FastFieldRangeQuery::new(lower, upper))
 }

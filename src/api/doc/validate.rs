@@ -156,9 +156,9 @@ pub fn document_complaint(st: &IdxState, source: &Value) -> Option<(String, Stri
             // read the text as written: the usual path folds a date through
             // the resolution the index keeps, which is the very thing being
             // checked for
-            let Some(dt) = boostcore::time::OffsetDateTime::parse(
+            let Some(dt) = velocore::time::OffsetDateTime::parse(
                 &text,
-                &boostcore::time::format_description::well_known::Rfc3339,
+                &velocore::time::format_description::well_known::Rfc3339,
             )
             .ok()
             .or_else(|| crate::store::parse_date_lenient(&text)) else {

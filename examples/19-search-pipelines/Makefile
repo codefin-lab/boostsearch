@@ -14,7 +14,7 @@ serve:
 	./node.sh
 
 run:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS="$${BS:-http://127.0.0.1:9279}" ./run.sh'
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS="$${VS:-http://127.0.0.1:9279}" ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -25,6 +25,6 @@ print('requests and data: valid JSON')"
 
 clean:
 	@sh -c 'if [ -f .env ]; then . ./.env; fi; \
-for i in $(INDICES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9279}/$$i" > /dev/null 2>&1 || true; done; \
-for p in $(PIPELINES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9279}/_search/pipeline/$$p" > /dev/null 2>&1 || true; done; \
+for i in $(INDICES); do curl -sS -X DELETE "$${VS:-http://127.0.0.1:9279}/$$i" > /dev/null 2>&1 || true; done; \
+for p in $(PIPELINES); do curl -sS -X DELETE "$${VS:-http://127.0.0.1:9279}/_search/pipeline/$$p" > /dev/null 2>&1 || true; done; \
 echo "deleted: $(INDICES) and the search pipelines $(PIPELINES)"'

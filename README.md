@@ -1,9 +1,9 @@
-# BoostSearch
+# VeloSearch
 
-[![ci](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/boostsearch/actions/workflows/ci.yml)
+[![ci](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml/badge.svg)](https://github.com/codefin-lab/velosearch/actions/workflows/ci.yml)
 
 A drop-in replacement for OpenSearch, written in Rust, on top of
-[BoostCore](https://github.com/codefin-lab/boostcore) (a fork of tantivy).
+[VeloCore](https://github.com/codefin-lab/velocore) (a fork of tantivy).
 
 It speaks the OpenSearch REST API — the same requests, the same JSON back, the
 same words in its errors — and is checked against OpenSearch's own conformance
@@ -51,10 +51,10 @@ Both engines measured on the same machine, on the same day, with the same
 corpus and the same client: a Google Compute Engine `n2-standard-8` (eight
 vCPUs, Ubuntu 24.04, SSD), 200,000 web-log documents, `tools/bench.py` driving
 each in turn with nothing else running -- OpenSearch 3.1.0 from its official
-image with security off, BoostSearch as this repository builds it. Five runs
-each, the median shown. **BoostSearch is ahead on all 34 dimensions.**
+image with security off, VeloSearch as this repository builds it. Five runs
+each, the median shown. **VeloSearch is ahead on all 34 dimensions.**
 
-| dimension | unit | OpenSearch 3.1.0 | BoostSearch | better by |
+| dimension | unit | OpenSearch 3.1.0 | VeloSearch | better by |
 |---|---|---|---|---|
 | queries a second, one client | q/s | 134.9 | 378.7 | +181% |
 | memory, idle | MB | 1,501 | 37.7 | +97% |
@@ -93,7 +93,7 @@ each, the median shown. **BoostSearch is ahead on all 34 dimensions.**
 
 Memory is the resident set of the one server process, the container's own
 figure for OpenSearch. On an Apple M4 Max the same comparison reads higher for
-both -- BoostSearch indexes 92,000 documents a second there and answers 1,391
+both -- VeloSearch indexes 92,000 documents a second there and answers 1,391
 queries a second on one client -- and the ratios are of the same shape. How
 the numbers are taken, and what not to read into them, is in
 [docs/performance.md](docs/performance.md); every change is held to this
@@ -122,14 +122,14 @@ may use `icu_tokenizer` deserves a true answer.
 
 ```bash
 cargo build --release
-./target/release/boostsearch
+./target/release/velosearch
 ```
 
 It listens on `127.0.0.1:9200`. In Docker:
 
 ```bash
-docker build -t boostsearch .
-docker run -p 9200:9200 -v boostsearch-data:/var/lib/boostsearch boostsearch
+docker build -t velosearch .
+docker run -p 9200:9200 -v velosearch-data:/var/lib/velosearch velosearch
 ```
 
 Or the built image: every commit on `main` the gates pass on is pushed to
@@ -138,32 +138,32 @@ started and asked to write and find a document -- `:latest` is the newest
 such commit, `:<sha>` any of them, and a release tag `v1.2.3` is `:1.2.3`.
 
 ```bash
-docker pull asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch:latest
+docker pull asia-southeast1-docker.pkg.dev/codefin-lab/velosearch/velosearch:latest
 ```
 
 The settings that matter most:
 
 | | |
 |---|---|
-| `BOOSTSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
-| `BOOSTSEARCH_DATA` | where indices live, mmapped and surviving a restart; unset keeps everything in RAM |
-| `BOOSTSEARCH_CONFIG` | where `boostsearch.yml` and the plugins' data directories live |
-| `BOOSTSEARCH_PATH_REPO` | where filesystem snapshot repositories may live (default `<data>/repo`) |
+| `VELOSEARCH_ADDR` | where to listen (default `127.0.0.1:9200`) |
+| `VELOSEARCH_DATA` | where indices live, mmapped and surviving a restart; unset keeps everything in RAM |
+| `VELOSEARCH_CONFIG` | where `velosearch.yml` and the plugins' data directories live |
+| `VELOSEARCH_PATH_REPO` | where filesystem snapshot repositories may live (default `<data>/repo`) |
 
-Everything else is a setting in `config/boostsearch.yml`, spelled the way
+Everything else is a setting in `config/velosearch.yml`, spelled the way
 OpenSearch spells it, and readable from the environment as
-`BOOSTSEARCH_` + the dotted name upper-cased. `docs/settings.md` lists them.
+`VELOSEARCH_` + the dotted name upper-cased. `docs/settings.md` lists them.
 
 ## The console
 
 OpenSearch Dashboards is two things: a browser application and a Node server
-it boots from. BoostSearch replaces the server and leaves the application as
+it boots from. VeloSearch replaces the server and leaves the application as
 it is -- the same bundles, served from a Dashboards distribution you point it
-at, talking to a BoostSearch (or OpenSearch) engine:
+at, talking to a VeloSearch (or OpenSearch) engine:
 
 ```bash
-BOOSTSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards \
-BOOSTSEARCH_ENGINE=http://127.0.0.1:9200 \
+VELOSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards \
+VELOSEARCH_ENGINE=http://127.0.0.1:9200 \
 ./target/release/console
 ```
 
@@ -199,12 +199,12 @@ rather than guessing.
 
 ```bash
 # what your cluster actually uses, and whether this answers all of it
-python3 tools/compat_audit.py inventory --cluster $OPENSEARCH --engine $BOOSTSEARCH
+python3 tools/compat_audit.py inventory --cluster $OPENSEARCH --engine $VELOSEARCH
 
 # the same requests to both, compared answer by answer
 python3 tools/compat_audit.py corpus
 python3 tools/compat_audit.py replay --requests compat-corpus.ndjson \
-    --a $OPENSEARCH --b $BOOSTSEARCH --scores
+    --a $OPENSEARCH --b $VELOSEARCH --scores
 ```
 
 The first says whether anything your indices use is unanswered. The second
@@ -250,9 +250,9 @@ passes and adds them up.
 
 ## How it is built
 
-- one BoostCore index per index, documents stored whole and written into views:
+- one VeloCore index per index, documents stored whole and written into views:
   tokenized for `match`, untouched for `term`, and a third for `fielddata`
-- aggregations BoostCore can parse run inside it; the rest are peeled off the
+- aggregations VeloCore can parse run inside it; the rest are peeled off the
   request and computed a bucket at a time through the ordinary query path
 - dates are numbers, the way OpenSearch stores them: milliseconds for a `date`,
   nanoseconds for a `date_nanos`
@@ -273,7 +273,7 @@ way.
 | [docs/upgrading.md](docs/upgrading.md) | replacing an OpenSearch you run, and moving between versions of this |
 | [docs/console.md](docs/console.md) | the console's server: what it serves, what it pins, what it leaves out |
 | [docs/geoip.md](docs/geoip.md), [docs/phonetic.md](docs/phonetic.md) | the two processors that read data this does not ship |
-| [docs/boostcore.md](docs/boostcore.md) | what was changed in the fork of tantivy, and why |
+| [docs/velocore.md](docs/velocore.md) | what was changed in the fork of tantivy, and why |
 | [docs/adr/](docs/adr/) | the seven decisions that were hard to reverse |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | where things are, and what to run before you push |
 | [CONTEXT.md](CONTEXT.md) | what the words mean |
@@ -288,7 +288,7 @@ Dual licensed under either of
 at your option. Unless you say otherwise, any contribution you send in is
 licensed the same way, with no further conditions.
 
-BoostCore, the engine underneath, is MIT, as the tantivy it forked is. The
+VeloCore, the engine underneath, is MIT, as the tantivy it forked is. The
 Snowball stemmers for Catalan, Basque, Irish, Lithuanian, Estonian and
 Armenian, and the original Porter algorithm, are generated from the Snowball
 project's own definitions by its compiler and used under the BSD 3-clause

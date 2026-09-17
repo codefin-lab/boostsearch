@@ -1,7 +1,7 @@
 {
- "label": "obsearch-phase2",
+ "label": "velosearch-phase2",
  "target": {
-  "distribution": "obsearch",
+  "distribution": "velosearch",
   "number": "3.9.0",
   "lucene_version": "tantivy-0.26"
  },

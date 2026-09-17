@@ -3,22 +3,22 @@
 OpenSearch Dashboards is a browser application and a Node server. The
 application is a set of built bundles that boot from what the server tells
 them; the server serves those bundles, keeps the saved objects, and answers
-the few hundred routes the pages call. BoostSearch replaces the server. The
+the few hundred routes the pages call. VeloSearch replaces the server. The
 application is not touched: it is served, byte for byte, from a Dashboards
 distribution the console is pointed at.
 
 ## Running it
 
 ```bash
-BOOSTSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards   # a 3.1.0 distribution
-BOOSTSEARCH_ENGINE=http://127.0.0.1:9200                    # BoostSearch, or OpenSearch
+VELOSEARCH_CONSOLE_PATH=/usr/share/opensearch-dashboards   # a 3.1.0 distribution
+VELOSEARCH_ENGINE=http://127.0.0.1:9200                    # VeloSearch, or OpenSearch
 ./target/release/console
 ```
 
 The console has no login of its own, and every request it makes to the engine
-goes with the credentials in `BOOSTSEARCH_ENGINE` -- including the Dev Tools
+goes with the credentials in `VELOSEARCH_ENGINE` -- including the Dev Tools
 proxy, which by default forwards any path the page asks for
-(`BOOSTSEARCH_CONSOLE_PROXY_FILTER`, `.*` unless set, the same default the
+(`VELOSEARCH_CONSOLE_PROXY_FILTER`, `.*` unless set, the same default the
 Node server has). Against a secured engine that means whoever can reach the
 console can do whatever those credentials can do. The Node server it replaces
 behaves the same way without the security plugin's session handling; the
@@ -87,11 +87,11 @@ reference does not serve either. Multiple data sources and workspaces.
 - `tools/dashboards_check.py`: six areas that suite never asks about.
 - Every flow driven by hand in a browser -- Discover, Visualize, a
   dashboard, saved objects, Index Management, Dev Tools -- against a
-  BoostSearch node, in `docs/progress.md` under 13.6.
+  VeloSearch node, in `docs/progress.md` under 13.6.
 
 Every request that changes something must carry the `osd-xsrf` header, as
 the pages do; the suite does not, so the console it tests is started with
-`BOOSTSEARCH_CONSOLE_XSRF=false`, which is the `--server.xsrf.disableProtection=true`
+`VELOSEARCH_CONSOLE_XSRF=false`, which is the `--server.xsrf.disableProtection=true`
 the suite starts the Node server with.
 
 The suite needs the Dashboards repository bootstrapped

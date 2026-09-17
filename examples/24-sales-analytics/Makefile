@@ -14,7 +14,7 @@ serve:
 	./node.sh
 
 run:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS=$${BS:-http://127.0.0.1:9284} ./run.sh'
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS=$${VS:-http://127.0.0.1:9284} ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -30,10 +30,10 @@ data:
 
 clean:
 	@sh -c 'if [ -f .env ]; then . ./.env; fi; \
-B=$${BS:-http://127.0.0.1:9284}; \
+B=$${VS:-http://127.0.0.1:9284}; \
 curl -sS -X POST "$$B/_plugins/_transform/sales-monthly/_stop" > /dev/null 2>&1; \
 curl -sS -X DELETE "$$B/_plugins/_transform/sales-monthly?force=true" > /dev/null 2>&1; \
 curl -sS -X POST "$$B/_plugins/_rollup/jobs/sales-daily/_stop" > /dev/null 2>&1; \
 curl -sS -X DELETE "$$B/_plugins/_rollup/jobs/sales-daily" > /dev/null 2>&1; \
-for i in $(INDICES); do curl -sS -X DELETE "$${BS:-http://127.0.0.1:9284}/$$i" > /dev/null 2>&1 || true; done; \
+for i in $(INDICES); do curl -sS -X DELETE "$${VS:-http://127.0.0.1:9284}/$$i" > /dev/null 2>&1 || true; done; \
 echo "deleted: the transform sales-monthly, the rollup job sales-daily, $(INDICES)"'

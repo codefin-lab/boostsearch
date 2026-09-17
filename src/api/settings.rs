@@ -85,7 +85,7 @@ pub(crate) fn settings_view(raw: &Value, name: Option<&str>, flat: bool) -> Valu
     flatten_settings(raw, "", &mut flat_map);
     // how many routing shards an index was made with is kept for routing,
     // not as a setting anyone set, and the reference does not list it
-    flat_map.remove("index.boost_routing_shards");
+    flat_map.remove("index.velo_routing_shards");
     if let Some(name) = name
         && name != "_all"
         && name != "*"

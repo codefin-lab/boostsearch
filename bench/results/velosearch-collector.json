@@ -1,7 +1,7 @@
 {
- "label": "obsearch-collector",
+ "label": "velosearch-collector",
  "target": {
-  "distribution": "obsearch",
+  "distribution": "velosearch",
   "number": "3.9.0",
   "lucene_version": "tantivy-0.26"
  },

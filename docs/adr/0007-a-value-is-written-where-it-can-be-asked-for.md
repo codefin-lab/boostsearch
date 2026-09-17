@@ -76,7 +76,7 @@ the field's mapped type instead, which is where OpenSearch decides it too.
 Measured after the change, same 200,000 documents, both engines force-merged
 into a single segment, both given the same mapping:
 
-| mapping | BoostSearch | OpenSearch 3.1.0 |
+| mapping | VeloSearch | OpenSearch 3.1.0 |
 |---|---|---|
 | every field declared | **22.0 MiB** | 22.7 MiB |
 | seven of ten declared (what the bench uses) | 30.7 MiB | 27.1 MiB |

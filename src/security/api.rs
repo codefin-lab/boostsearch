@@ -1322,7 +1322,7 @@ pub async fn authtoken(State(store): State<Store>, body: String) -> Response {
             (StatusCode::UNAUTHORIZED, "Authentication finally failed").into_response()
         }
         Err((_, why)) => {
-            if std::env::var("BOOSTSEARCH_AUTH_DEBUG").is_ok() {
+            if std::env::var("VELOSEARCH_AUTH_DEBUG").is_ok() {
                 eprintln!("saml: {why}");
             }
             (StatusCode::UNAUTHORIZED, "").into_response()

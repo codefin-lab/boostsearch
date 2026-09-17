@@ -159,7 +159,7 @@ pub(crate) fn write_page(
                 } else {
                     "the query matched; the order comes from the sort"
                 };
-                // what BoostCore can say about the score, told Lucene's way;
+                // what VeloCore can say about the score, told Lucene's way;
                 // where it can say nothing, the score itself stands
                 let told = (!rescored && sort_keys.is_empty())
                     .then(|| {

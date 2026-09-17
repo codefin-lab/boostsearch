@@ -7,7 +7,7 @@ example's policy is written in seconds, so it needs a node started with a short
 interval:
 
 ```bash
-make serve          # node.sh sets BOOSTSEARCH_ISM_INTERVAL_MS=2000 for you
+make serve          # node.sh sets VELOSEARCH_ISM_INTERVAL_MS=2000 for you
 ```
 
 If you are using your own node, start it with that variable, or wait several

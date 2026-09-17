@@ -289,7 +289,7 @@ impl ShardHost for StoreSource {
         let to = to.to_vec();
         tokio::spawn(async move {
             if let Err(why) = super::replication::resync(&store, &index, shard, term, &to).await {
-                eprintln!("boostsearch: {why}");
+                eprintln!("velosearch: {why}");
             }
         });
     }

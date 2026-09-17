@@ -144,12 +144,12 @@ tokio::task_local! {
     pub static WRITES: Writes;
 }
 
-/// `BOOSTSEARCH_TRACE_WRITES`: every write, on every node, as it is copied,
+/// `VELOSEARCH_TRACE_WRITES`: every write, on every node, as it is copied,
 /// taken, refused or answered for -- for following one document through a
 /// chaos run, where the copies end up disagreeing about it.
 fn trace_writes() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("BOOSTSEARCH_TRACE_WRITES").is_ok())
+    *ON.get_or_init(|| std::env::var("VELOSEARCH_TRACE_WRITES").is_ok())
 }
 
 /// Where traced lines wait for the disk. A line written straight to stderr
@@ -405,9 +405,9 @@ async fn fail_copies_written(index: &str, shard: u32, why: &str, also: &[NodeId]
             (n.clone(), aid)
         })
         .collect();
-    if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+    if std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok() {
         eprintln!(
-            "boostsearch: {} failing the copies a refused write reached ({why}): {}",
+            "velosearch: {} failing the copies a refused write reached ({why}): {}",
             super::clock().wall(),
             mine.iter()
                 .map(|(n, a)| format!("{}={}", n.as_str(), if a.is_empty() { "?" } else { a }))
@@ -492,11 +492,11 @@ fn not_from_the_primary(index: &str, ops: &[ReplicaOp], sender: &NodeId) -> Opti
 /// here all the same, and if this node is not the primary any more nobody
 /// will take them away again. One line per refusal, not per write.
 fn note_refused_after_writing(why: &str, ids: &[String]) {
-    if ids.is_empty() || std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_err() {
+    if ids.is_empty() || std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_err() {
         return;
     }
     eprintln!(
-        "boostsearch: {} refused after writing ({why}): {}",
+        "velosearch: {} refused after writing ({why}): {}",
         super::clock().wall(),
         ids.iter().take(25).cloned().collect::<Vec<_>>().join(",")
     );
@@ -608,9 +608,9 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             None => None,
                         };
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
-                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                            if std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok() {
                                 eprintln!(
-                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    "velosearch: the manager would not record a copy of [{index}]: {}",
                                     match &answer {
                                         Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
                                         None => "no answer".to_string(),
@@ -673,9 +673,9 @@ pub async fn replicate(ops: Vec<ReplicaOp>, refresh: &str) -> BTreeMap<String, A
                             None => None,
                         };
                         if !matches!(answer, Some(ref a) if a.kind == Kind::Response) {
-                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                            if std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok() {
                                 eprintln!(
-                                    "boostsearch: the manager would not record a copy of [{index}]: {}",
+                                    "velosearch: the manager would not record a copy of [{index}]: {}",
                                     match &answer {
                                         Some(a) => String::from_utf8_lossy(&a.body).into_owned(),
                                         None => "no answer".to_string(),
@@ -1562,7 +1562,7 @@ pub async fn seed_replica(
     // a copy filled now matches the primary it is filled from; a resync
     // opened before would trim what the fill brought in
     open_resyncs().lock().remove(index);
-    let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+    let notes = std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok();
     // whether there was anything here before this recovery: a half-filled copy
     // this recovery made is not something to leave behind
     let held_before = store.get(index).is_some();
@@ -1598,7 +1598,7 @@ pub async fn seed_replica(
         // does not hold is a copy the next catch-up will walk past them
         let at_seq = store.get(index).map(|st| st.read().seq_no).unwrap_or(0);
         eprintln!(
-            "boostsearch: {} filled [{index}] as {allocation_id} from {}: {before} documents here before, {after} after, seq_no {at_seq} ({})",
+            "velosearch: {} filled [{index}] as {allocation_id} from {}: {before} documents here before, {after} after, seq_no {at_seq} ({})",
             super::clock().wall(),
             primary.as_str(),
             match &r {
@@ -1623,7 +1623,7 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
         // document comes through after the copying and before the copy is a
         // copy. Cheap enough to leave on with the cluster's own notes: one
         // line for a recovery, not one for a write.
-        let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+        let notes = std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok();
         let mut waited: Vec<String> = Vec::new();
         loop {
             let batch = {
@@ -1635,7 +1635,7 @@ async fn apply_what_waited(store: &Store, index: &str) -> Result<(), String> {
                         m.remove(&name);
                         if notes && !waited.is_empty() {
                             eprintln!(
-                                "boostsearch: {} [{name}]: {} writes waited for the fill and went \
+                                "velosearch: {} [{name}]: {} writes waited for the fill and went \
                                  in after it: {}",
                                 super::clock().wall(),
                                 waited.len(),
@@ -1690,7 +1690,7 @@ async fn seed_replica_inner(
             Ok(false) => {}
             Err(why) => {
                 // the files did not come: the documents will
-                eprintln!("boostsearch: {why}; scanning instead");
+                eprintln!("velosearch: {why}; scanning instead");
             }
         }
     }
@@ -1789,7 +1789,7 @@ pub async fn catch_up_by_scan(
     let mut tries = 0;
     let mut pages = 0usize;
     let mut applied_total = 0usize;
-    let notes = std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok();
+    let notes = std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok();
     // A copy the manager has just placed is known to the primary only once
     // the primary has taken the publication that placed it; a write it took
     // before then went to the copies it knew, not to this one, and if the
@@ -1868,7 +1868,7 @@ pub async fn catch_up_by_scan(
     }
     if notes {
         eprintln!(
-            "boostsearch: {} caught [{index}] up from {} starting at seq {from}: {applied_total} documents in {pages} pages, stopped at seq {from_seq}",
+            "velosearch: {} caught [{index}] up from {} starting at seq {from}: {applied_total} documents in {pages} pages, stopped at seq {from_seq}",
             super::clock().wall(),
             primary.as_str()
         );
@@ -2007,9 +2007,9 @@ pub async fn resync(
     for node in to.iter().filter(|n| !missed.contains(n)) {
         let _ = rt.call(node, REPLICA_WRITE, mark("end"), std::time::Duration::from_secs(60)).await;
     }
-    if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+    if std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok() {
         eprintln!(
-            "boostsearch: sent {sent} documents of [{index}][{shard}] to {} copies in term {term}, the primary at seq {}",
+            "velosearch: sent {sent} documents of [{index}][{shard}] to {} copies in term {term}, the primary at seq {}",
             to.len(),
             store.get(index).map(|st| st.read().seq_no).unwrap_or(0)
         );

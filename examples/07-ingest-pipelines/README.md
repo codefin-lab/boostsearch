@@ -39,7 +39,7 @@ sets `client.geo.located: false` rather than failing -- the rest of the example
 still works. `docs/geoip.md` says where the databases go.
 
 ```bash
-./target/release/boostsearch &
+./target/release/velosearch &
 examples/07-ingest-pipelines/run.sh
 ```
 

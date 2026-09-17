@@ -105,7 +105,7 @@ pub(crate) async fn cat_by_name(
                     ("pid", std::process::id().to_string()),
                     ("version", "3.9.0".into()),
                     ("type", "tar".into()),
-                    ("build", "boostsearch".into()),
+                    ("build", "velosearch".into()),
                     ("jdk", "21".into()),
                     (
                         "uptime",

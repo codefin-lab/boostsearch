@@ -96,7 +96,7 @@ import json, sys
 d = json.load(sys.stdin)
 d['metric'] = json.loads('{' + '''$m''' + '}')
 print(json.dumps(d))" > /tmp/rankeval.json
-  "${CURL[@]}" -X GET "$BS/$IDX/_rank_eval" -H 'Content-Type: application/json' --data-binary @/tmp/rankeval.json \
+  "${CURL[@]}" -X GET "$VS/$IDX/_rank_eval" -H 'Content-Type: application/json' --data-binary @/tmp/rankeval.json \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("metric_score", round(d.get("metric_score",0),4))'
 done
 

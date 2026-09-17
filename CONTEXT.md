@@ -4,14 +4,14 @@ The language this project uses, and what each word is bound to. Not a spec.
 
 ## The things
 
-**BoostSearch** — the search server. Speaks the OpenSearch HTTP API. One
-process, one node. Formerly called obsearch; the name changed on 2026-08-31
+**VeloSearch** — the search server. Speaks the OpenSearch HTTP API. One
+process, one node. Formerly called velosearch; the name changed on 2026-08-31
 and nothing else did.
 
-**BoostCore** — the search engine library BoostSearch is built on. A fork of
+**VeloCore** — the search engine library VeloSearch is built on. A fork of
 tantivy 0.26.1, kept in its own repository so the parts of the engine the
 server depends on can be changed. Not a general-purpose fork: it exists to
-serve BoostSearch.
+serve VeloSearch.
 
 **The compatibility target** — OpenSearch 3.x. When this project says
 "compatible", it means "answers what OpenSearch 3.x answers, to the request
@@ -21,7 +21,7 @@ a second version, and no claim is made about it.
 ## The measures
 
 **The conformance corpus** — OpenSearch's own YAML REST tests, run against
-BoostSearch by `tools/yaml_runner.py`. Two parts, and a section is the unit:
+VeloSearch by `tools/yaml_runner.py`. Two parts, and a section is the unit:
 
 - *the core spec*: 409 files, 1,427 sections, from `rest-api-spec`
 - *the module corpus*: 206 files, 895 sections, shipped by the modules and
@@ -35,7 +35,7 @@ suite can be pointed at an HTTP server. Nothing is deferred to a later version;
 sections passing out of 2,322, not files.
 
 **The behavioural diff** — what `tools/compat_audit.py replay` reports: the
-same request put to OpenSearch and to BoostSearch, with the answers compared.
+same request put to OpenSearch and to VeloSearch, with the answers compared.
 An answer is the documents that came back in the order they came back, the
 numbers over them, and the tokens a text was cut into. Everything else --
 `took`, `_shards`, ids that are allowed to differ -- is not an answer.
@@ -79,7 +79,7 @@ and to `field_caps`, not merely stripped on the way out.
 
 ## The cluster words
 
-**A node** — one BoostSearch process. In version 1 a cluster is several of
+**A node** — one VeloSearch process. In version 1 a cluster is several of
 them, and which shard lives where is decided by the cluster itself rather than
 by a file someone edits.
 

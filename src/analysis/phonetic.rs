@@ -49,10 +49,10 @@ fn beider_morse_rules() -> Option<&'static ConfigFiles> {
 
 fn rule_dirs() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    if let Ok(d) = std::env::var("BOOSTSEARCH_PHONETIC_RULES") {
+    if let Ok(d) = std::env::var("VELOSEARCH_PHONETIC_RULES") {
         out.push(std::path::PathBuf::from(d));
     }
-    for base in [std::env::var("BOOSTSEARCH_CONFIG").ok(), std::env::var("BOOSTSEARCH_DATA").ok()]
+    for base in [std::env::var("VELOSEARCH_CONFIG").ok(), std::env::var("VELOSEARCH_DATA").ok()]
         .into_iter()
         .flatten()
     {

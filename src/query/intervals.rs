@@ -299,13 +299,13 @@ impl Source {
     }
 
     /// The documents of a segment this source's iterator stands on.
-    fn candidates(&self, docs: &dyn Fn(&Term) -> Vec<boostcore::DocId>) -> Vec<boostcore::DocId> {
+    fn candidates(&self, docs: &dyn Fn(&Term) -> Vec<velocore::DocId>) -> Vec<velocore::DocId> {
         let any = |subs: &[Source]| {
             subs.iter()
-                .fold(Vec::new(), |acc: Vec<boostcore::DocId>, s| union(&acc, &s.candidates(docs)))
+                .fold(Vec::new(), |acc: Vec<velocore::DocId>, s| union(&acc, &s.candidates(docs)))
         };
         let all = |subs: &[&Source]| {
-            let mut acc: Option<Vec<boostcore::DocId>> = None;
+            let mut acc: Option<Vec<velocore::DocId>> = None;
             for s in subs {
                 let here = s.candidates(docs);
                 acc = Some(match acc {
@@ -318,7 +318,7 @@ impl Source {
         match self {
             Source::Term(t) => docs(t),
             Source::Multi(ts) => {
-                ts.iter().fold(Vec::new(), |acc: Vec<boostcore::DocId>, t| union(&acc, &docs(t)))
+                ts.iter().fold(Vec::new(), |acc: Vec<velocore::DocId>, t| union(&acc, &docs(t)))
             }
             Source::Nothing => Vec::new(),
             Source::Or(subs, _) => any(subs),
@@ -1228,7 +1228,7 @@ pub(crate) struct IntervalQuery {
 }
 
 impl Query for IntervalQuery {
-    fn weight(&self, _scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, _scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let mut terms = Vec::new();
         self.source.terms(&mut terms);
         Ok(Box::new(IntervalWeight {
@@ -1248,9 +1248,9 @@ struct IntervalWeight {
 impl IntervalWeight {
     fn frequencies(
         &self,
-        reader: &boostcore::SegmentReader,
-        only: Option<boostcore::DocId>,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, f32)>> {
+        reader: &velocore::SegmentReader,
+        only: Option<velocore::DocId>,
+    ) -> velocore::Result<Vec<(velocore::DocId, f32)>> {
         let mut lists = Vec::with_capacity(self.terms.len());
         for term in &self.terms {
             lists.push(docs_of(reader, term)?);
@@ -1295,9 +1295,9 @@ fn saturation(boost: f32, freq: f32) -> f32 {
 impl Weight for IntervalWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let scored = self
             .frequencies(reader, None)?
             .into_iter()
@@ -1308,15 +1308,15 @@ impl Weight for IntervalWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let Some((_, freq)) = self.frequencies(reader, Some(doc))?.into_iter().next() else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the intervals".to_string(),
             ));
         };
-        let mut explanation = boostcore::query::Explanation::new(
+        let mut explanation = velocore::query::Explanation::new(
             "Saturation function on interval frequency, computed as w * S / (S + k) from:",
             saturation(1.0, freq),
         );

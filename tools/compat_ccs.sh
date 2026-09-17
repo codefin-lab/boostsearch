@@ -16,9 +16,9 @@
 #     opensearchproject/opensearch:3.1.0
 #   python3 tools/yaml_runner.py --url http://127.0.0.1:9253 --manifest tools/ccs_remote_manifest.json
 #
-#   BOOST_PORT=9320 tools/gate_node.sh &          # the remote
+#   VELO_PORT=9320 tools/gate_node.sh &          # the remote
 #   python3 tools/yaml_runner.py --url http://127.0.0.1:9320 --manifest tools/ccs_remote_manifest.json
-#   BOOSTSEARCH_CLUSTER_REMOTE=my_remote_cluster:127.0.0.1:9320 BOOST_PORT=9336 tools/gate_node.sh &
+#   VELOSEARCH_CLUSTER_REMOTE=my_remote_cluster:127.0.0.1:9320 VELO_PORT=9336 tools/gate_node.sh &
 #   tools/compat_ccs.sh
 #
 # The remote's documents have generated ids, which differ between the

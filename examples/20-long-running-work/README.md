@@ -45,13 +45,13 @@ make run        # the example, in another terminal
 The longer form, and what this example needs of the node:
 
 ```bash
-BOOSTSEARCH_ADDR=127.0.0.1:9280 BOOSTSEARCH_TRANSPORT_PORT=9380 ./target/release/boostsearch &
-BS=http://127.0.0.1:9280 examples/20-long-running-work/run.sh
+VELOSEARCH_ADDR=127.0.0.1:9280 VELOSEARCH_TRANSPORT_PORT=9380 ./target/release/velosearch &
+VS=http://127.0.0.1:9280 examples/20-long-running-work/run.sh
 ```
 
 Nothing beyond a plain node. Port 9280 is also the default of the URL-repository
 fixture in `tools/`; if that fixture is running, start this example on another
-port with `PORT=9287 make serve` and `BS=http://127.0.0.1:9287`.
+port with `PORT=9287 make serve` and `VS=http://127.0.0.1:9287`.
 
 ## What to look for
 

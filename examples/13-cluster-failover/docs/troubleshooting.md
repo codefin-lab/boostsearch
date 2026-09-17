@@ -5,8 +5,8 @@
 Two settings must agree across all three:
 
 ```
-BOOSTSEARCH_DISCOVERY_SEED_HOSTS=127.0.0.1:9440,127.0.0.1:9441,127.0.0.1:9442
-BOOSTSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES=n1,n2,n3
+VELOSEARCH_DISCOVERY_SEED_HOSTS=127.0.0.1:9440,127.0.0.1:9441,127.0.0.1:9442
+VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES=n1,n2,n3
 ```
 
 The seed hosts are **transport** ports (9440-9442), not HTTP ports
@@ -16,7 +16,7 @@ produces three nodes that each think they are alone.
 Read the logs:
 
 ```bash
-tail -40 /tmp/boost-cluster-example/logs/n1.log
+tail -40 /tmp/velo-cluster-example/logs/n1.log
 ```
 
 ## `Address already in use`
@@ -83,7 +83,7 @@ which costs more time to disprove than the example takes to run.
 ## Cleaning up
 
 ```bash
-rm -rf /tmp/boost-cluster-example
+rm -rf /tmp/velo-cluster-example
 ```
 
 The nodes are already stopped; this removes their data and logs.

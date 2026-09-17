@@ -301,7 +301,7 @@ impl IdxState {
 
     /// What one segment takes: its files on disk, or for an index held in
     /// memory what the segment's structures add up to.
-    pub fn segment_bytes(&self, reader: &boostcore::SegmentReader) -> u64 {
+    pub fn segment_bytes(&self, reader: &velocore::SegmentReader) -> u64 {
         let Some(dir) = &self.path else {
             return reader.space_usage().map(|u| u.total().get_bytes()).unwrap_or(0);
         };
@@ -435,13 +435,13 @@ impl IdxState {
 
     /// Read every document and take the vectors out of it.
     pub fn rebuild_vectors(&mut self) {
-        use boostcore::schema::document::Value as _;
+        use velocore::schema::document::Value as _;
         let searcher = self.realtime.searcher();
         let mut held = crate::knn::Vectors::default();
         for segment in searcher.segment_readers() {
             let Ok(store) = segment.get_store_reader(1) else { continue };
             for doc_id in segment.doc_ids_alive() {
-                let Ok(doc) = store.get::<boostcore::TantivyDocument>(doc_id) else { continue };
+                let Ok(doc) = store.get::<velocore::TantivyDocument>(doc_id) else { continue };
                 let Some(id) = doc.get_first(self.fields.id).and_then(|v| v.as_str()) else {
                     continue;
                 };

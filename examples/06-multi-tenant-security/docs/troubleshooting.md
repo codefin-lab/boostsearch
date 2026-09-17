@@ -9,8 +9,8 @@ it on:
 make serve
 ```
 
-which sets `BOOSTSEARCH_DISABLED=false` and
-`BOOSTSEARCH_RESTAPI_ROLES_ENABLED=all_access`. If you are using your own node,
+which sets `VELOSEARCH_DISABLED=false` and
+`VELOSEARCH_RESTAPI_ROLES_ENABLED=all_access`. If you are using your own node,
 start it with both.
 
 ## Every request returns 401
@@ -25,7 +25,7 @@ AUTH=admin:mypassword ./run.sh
 ## `PUT /_plugins/_security/api/roles/...` returns 403
 
 The caller's role is not allowed to use the security REST API.
-`BOOSTSEARCH_RESTAPI_ROLES_ENABLED` names which role may, and it must include
+`VELOSEARCH_RESTAPI_ROLES_ENABLED` names which role may, and it must include
 the role the administrator has -- `all_access` in this example.
 
 ## Creating a user fails with `Password is similar to user name`

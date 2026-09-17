@@ -1,15 +1,15 @@
-//! Index registry: one BoostCore index per OpenSearch index, plus its mapping.
+//! Index registry: one VeloCore index per OpenSearch index, plus its mapping.
 
 use anyhow::{Result, anyhow};
-use boostcore::directory::MmapDirectory;
-use boostcore::schema::*;
-use boostcore::{Index, IndexReader, IndexWriter, TantivyDocument};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasherDefault;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use velocore::directory::MmapDirectory;
+use velocore::schema::*;
+use velocore::{Index, IndexReader, IndexWriter, TantivyDocument};
 
 mod names;
 pub use names::*;
@@ -201,7 +201,7 @@ pub const KIND_U64: u8 = 2;
 pub const KIND_F64: u8 = 4;
 pub const KIND_STR: u8 = 8;
 pub const KIND_BOOL: u8 = 16;
-/// A string that parses as a date: BoostCore indexes it as a date, not as text,
+/// A string that parses as a date: VeloCore indexes it as a date, not as text,
 /// so a range over it must address the date column and not the string one.
 pub const KIND_DATE: u8 = 32;
 
@@ -270,7 +270,7 @@ pub fn build_schema() -> (Schema, Fields) {
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         ),
     );
-    // `_raw` keeps its own fast fields: BoostCore's RangeQuery over a JSON field
+    // `_raw` keeps its own fast fields: VeloCore's RangeQuery over a JSON field
     // only works on fast fields, so dropping them here breaks every range query
     // that resolves to the untokenised view. Measured: removing them buys ~5% of
     // the write path, which is not worth the semantics.
@@ -428,7 +428,7 @@ pub struct DocMeta {
 ///
 /// A refresh in OpenSearch reaches one shard: a delete on the shard holding
 /// document 1 becomes visible while a delete on another shard does not. One
-/// BoostCore index stands in for every shard here, and a commit would show
+/// VeloCore index stands in for every shard here, and a commit would show
 /// everything at once -- so an operation waits here until its own shard is
 /// refreshed, and only then reaches the writer.
 pub enum PendingOp {
@@ -600,7 +600,7 @@ impl IdxState {
     ///
     /// The analyzers an index defines are registered under the names the
     /// mapping uses, and every path that names one is recorded, so that
-    /// BoostCore cuts that path with it and leaves the rest alone. Called
+    /// VeloCore cuts that path with it and leaves the rest alone. Called
     /// whenever either of the two can have changed.
     pub fn apply_analysis(&mut self) {
         self.analysis = crate::analysis::Registry::from_settings(&self.settings);
@@ -639,7 +639,7 @@ pub struct Store {
     /// One search thread pool for the whole process. Giving each index its own
     /// costs a pool per index, which is invisible with one index and ruinous
     /// with hundreds.
-    executor: boostcore::Executor,
+    executor: velocore::Executor,
     /// Indices holding a live writer, oldest first, capped so a load touching
     /// hundreds of indices cannot hold hundreds of sets of indexing threads.
     ///
@@ -701,7 +701,7 @@ impl Store {
     /// had written by now, so a later search can be held to that.
     pub fn open_pit(&self, expr: &str, keep_alive_ms: u64) -> String {
         self.sweep_contexts();
-        let id = format!("boostsearch-pit-{}", random_token());
+        let id = format!("velosearch-pit-{}", random_token());
         let mut ceiling = HashMap::new();
         for name in self.resolve(expr) {
             if let Some(st) = self.get(&name) {
@@ -820,16 +820,16 @@ pub fn release_freed_memory() {
     }
 }
 
-fn shared_executor() -> boostcore::Executor {
-    let threads = std::env::var("BOOSTSEARCH_SEARCH_THREADS")
+fn shared_executor() -> velocore::Executor {
+    let threads = std::env::var("VELOSEARCH_SEARCH_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     if threads <= 1 {
-        return boostcore::Executor::single_thread();
+        return velocore::Executor::single_thread();
     }
-    boostcore::Executor::multi_thread(threads, "boostsearch-search-")
-        .unwrap_or_else(|_| boostcore::Executor::single_thread())
+    velocore::Executor::multi_thread(threads, "velosearch-search-")
+        .unwrap_or_else(|_| velocore::Executor::single_thread())
 }
 
 impl Store {}
@@ -1006,7 +1006,7 @@ const DATE_CEIL: i64 = 8_835_004_800_000;
 
 /// Where a flat_object field's values are gathered so the field itself can be
 /// queried without naming a path inside it.
-pub const FLAT_VALUES: &str = "_bs_values";
+pub const FLAT_VALUES: &str = "_vs_values";
 
 /// How many tokens a standard analyser would find.
 pub fn token_count(text: &str) -> u64 {
@@ -1015,7 +1015,7 @@ pub fn token_count(text: &str) -> u64 {
 
 fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
     let dt =
-        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).ok()?;
+        velocore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).ok()?;
     Some(match format {
         "epoch_millis" => ms.to_string(),
         "epoch_second" => (ms / 1000).to_string(),
@@ -1037,8 +1037,8 @@ fn format_millis_utc(ms: i64, format: &str) -> Option<String> {
     })
 }
 
-fn days_in_month(year: i32, month: boostcore::time::Month) -> u8 {
-    use boostcore::time::Month::*;
+fn days_in_month(year: i32, month: velocore::time::Month) -> u8 {
+    use velocore::time::Month::*;
     match month {
         January | March | May | July | August | October | December => 31,
         April | June | September | November => 30,

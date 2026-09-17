@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// BoostCore cannot order a `terms` aggregation by a nested bucket's doc_count,
+/// VeloCore cannot order a `terms` aggregation by a nested bucket's doc_count,
 /// so strip that order and reapply it to the finished buckets ourselves.
 /// Lucene's `StringHelper.murmurhash3_x86_32`, which is what OpenSearch hashes
 /// a string term with when a terms aggregation is split into partitions.

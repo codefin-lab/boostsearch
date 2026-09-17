@@ -55,7 +55,7 @@ pub struct TcpTransport {
     /// the transport's own handle, so `send` can open a connection
     self_weak: std::sync::Weak<TcpTransport>,
     /// peers this node is cut off from: a partition made real at this end,
-    /// for the chaos runs (`BOOSTSEARCH_CHAOS=1`)
+    /// for the chaos runs (`VELOSEARCH_CHAOS=1`)
     cut: RwLock<std::collections::HashSet<NodeId>>,
     handler: RwLock<Option<Arc<dyn Handler>>>,
     /// peers seen through a handshake, with what they said
@@ -343,7 +343,7 @@ impl TcpTransport {
                 }
             }
         }
-        if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false) {
+        if std::env::var("VELOSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false) {
             eprintln!("transport {}: connection with {peer_id} closed", self.me.node_id);
         }
         Ok(())

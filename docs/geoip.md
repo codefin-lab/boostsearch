@@ -9,9 +9,9 @@ change nothing but where the server looks for them.
 
 In this order, first hit wins:
 
-1. `$BOOSTSEARCH_GEOIP_PATH`
-2. `$BOOSTSEARCH_CONFIG/ingest-geoip/`
-3. `$BOOSTSEARCH_DATA/config/ingest-geoip/`
+1. `$VELOSEARCH_GEOIP_PATH`
+2. `$VELOSEARCH_CONFIG/ingest-geoip/`
+3. `$VELOSEARCH_DATA/config/ingest-geoip/`
 4. `./config/ingest-geoip/`
 5. beside the binary: `ingest-geoip/`, then `../modules/ingest-geoip/`
 
@@ -56,9 +56,9 @@ is not a decision about what a release contains.
 
 ## What the suites are run against
 
-`BOOSTSEARCH_GEOIP_PATH` points at a directory holding the three GeoLite2
-databases, copied out of OpenSearch's own container -- `~/boost-fixtures/geoip-db`
-by default, which `tools/gate_node.sh` passes and `BOOST_FIXTURES` moves. They
+`VELOSEARCH_GEOIP_PATH` points at a directory holding the three GeoLite2
+databases, copied out of OpenSearch's own container -- `~/velo-fixtures/geoip-db`
+by default, which `tools/gate_node.sh` passes and `VELO_FIXTURES` moves. They
 were kept in `/tmp` until a restart emptied it and seven sections failed for
 want of a file. The same shape is used
 for the Beider-Morse rules and for the repository fixture: the code is proved

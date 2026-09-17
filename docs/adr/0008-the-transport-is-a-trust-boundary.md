@@ -57,7 +57,7 @@ peer whose connection carried it.**
    cannot be answered by a third party.
 3. A node refuses to listen for transport connections on a non-loopback
    address with transport TLS off, unless the operator says so with
-   `BOOSTSEARCH_TRANSPORT_INSECURE=true`. A single-node development server on
+   `VELOSEARCH_TRANSPORT_INSECURE=true`. A single-node development server on
    127.0.0.1 needs no certificates; a node reachable from another machine
    does. This is the same rule the HTTP port already follows.
 4. Coordination messages are additionally held to the cluster's own

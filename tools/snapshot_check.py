@@ -11,10 +11,10 @@ short, has a line spoiled, and is taken away, and each restore must refuse
 rather than bring back part of the index and call it success.
 
 Run against a node whose `path.repo` holds the repository directory, which
-is what `tools/gate_node.sh` arranges (`BOOST_URL_REPO`, /tmp/boost-url-repo
+is what `tools/gate_node.sh` arranges (`VELO_URL_REPO`, /tmp/velo-url-repo
 by default):
 
-    BOOST_URL=http://127.0.0.1:9380 BOOST_REPO_DIR=/tmp/boost-url-repo \\
+    VELO_URL=http://127.0.0.1:9380 VELO_REPO_DIR=/tmp/velo-url-repo \\
         python3 tools/snapshot_check.py
 """
 
@@ -26,9 +26,9 @@ import sys
 import urllib.error
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
-REPO_ROOT = os.environ.get("BOOST_REPO_DIR", "/tmp/boost-url-repo")
-DOCS = int(os.environ.get("BOOST_SNAPSHOT_DOCS", "2500"))
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
+REPO_ROOT = os.environ.get("VELO_REPO_DIR", "/tmp/velo-url-repo")
+DOCS = int(os.environ.get("VELO_SNAPSHOT_DOCS", "2500"))
 
 
 def call(method, path, body=None, ndjson=False):

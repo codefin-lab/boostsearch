@@ -1,11 +1,11 @@
-use boostcore::aggregation::AggregationCollector;
-use boostcore::aggregation::agg_req::Aggregations;
-use boostcore::query::{RangeQuery, TermQuery};
-use boostcore::schema::*;
-use boostcore::{Index, TantivyDocument, collector::TopDocs};
 use std::ops::Bound;
+use velocore::aggregation::AggregationCollector;
+use velocore::aggregation::agg_req::Aggregations;
+use velocore::query::{RangeQuery, TermQuery};
+use velocore::schema::*;
+use velocore::{Index, TantivyDocument, collector::TopDocs};
 
-fn main() -> boostcore::Result<()> {
+fn main() -> velocore::Result<()> {
     let mut sb = Schema::builder();
     let dyn_opts = JsonObjectOptions::default()
         .set_stored()
@@ -34,11 +34,11 @@ fn main() -> boostcore::Result<()> {
         [("hello world", 1i64), ("goodbye world", 5), ("hello there", 10)].iter().enumerate()
     {
         let v = serde_json::json!({"title": name, "count": cnt, "tag": "a-b"});
-        let obj: std::collections::BTreeMap<String, boostcore::schema::OwnedValue> = v
+        let obj: std::collections::BTreeMap<String, velocore::schema::OwnedValue> = v
             .as_object()
             .unwrap()
             .iter()
-            .map(|(k, x)| (k.clone(), boostcore::schema::OwnedValue::from(x.clone())))
+            .map(|(k, x)| (k.clone(), velocore::schema::OwnedValue::from(x.clone())))
             .collect();
         let mut d = TantivyDocument::default();
         d.add_object(f_dyn, obj.clone());
@@ -84,7 +84,7 @@ fn main() -> boostcore::Result<()> {
     }))
     .unwrap();
     let res = s.search(
-        &boostcore::query::AllQuery,
+        &velocore::query::AllQuery,
         &AggregationCollector::from_aggs(agg, Default::default()),
     )?;
     println!("aggs -> {}", serde_json::to_string(&res).unwrap());

@@ -40,7 +40,7 @@ is not a regression.
 The release gate -- every dimension ahead of OpenSearch -- does not need
 OpenSearch running every time. It was measured once, on this corpus, on one
 machine, beside this engine measured the same way; both sets of numbers are in
-`bench/results/final-os-clean-*.json` and `final-obs-clean-*.json`, and every
+`bench/results/final-os-clean-*.json` and `final-velosearch-clean-*.json`, and every
 run of the gate reports what they said: **ahead on all 34 dimensions**. That is
 a reading of a file rather than a fresh measurement, and it is labelled as
 such. Measuring against OpenSearch again is a thing to do when the reference

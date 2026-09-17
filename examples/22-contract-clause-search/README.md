@@ -46,11 +46,11 @@ make run        # the example, in another terminal
 The longer form, and what this example needs of the node:
 
 ```bash
-./target/release/boostsearch &
+./target/release/velosearch &
 examples/22-contract-clause-search/run.sh
 ```
 
-`BS` sets the address if the server is not on `http://127.0.0.1:9200`. The
+`VS` sets the address if the server is not on `http://127.0.0.1:9200`. The
 node needs nothing special; `node.sh` only gives it a port of its own.
 
 ## What to look for

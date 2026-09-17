@@ -76,7 +76,7 @@ expect_hits 1 GET "/$IDX/_search" '{ "query": { "term": { "attachment.author": "
 step "a bundle: several files in one document, read by foreach"
 reqf PUT "/_ingest/pipeline/library-bundle" requests/07-a-bundle-several-files-in-one.json
 as_bundle board_pack_2026-02-10_february-meeting data/files/board-pack/agenda.txt data/files/board-pack/risk-register.docx \
-  | "${CURL[@]}" -X PUT "$BS/$IDX/_doc/board_pack_2026-02-10_february-meeting?pipeline=library-bundle&refresh=wait_for" \
+  | "${CURL[@]}" -X PUT "$VS/$IDX/_doc/board_pack_2026-02-10_february-meeting?pipeline=library-bundle&refresh=wait_for" \
       -H 'Content-Type: application/json' --data-binary @-
 echo
 req GET "/$IDX/_doc/board_pack_2026-02-10_february-meeting?_source_excludes=attachments.attachment.content"

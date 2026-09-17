@@ -215,7 +215,7 @@ impl Runtime {
                     },
                 };
                 let trace =
-                    std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false);
+                    std::env::var("VELOSEARCH_CLUSTER_DEBUG").map(|v| v == "2").unwrap_or(false);
                 if trace {
                     let what = match &input {
                         Input::Start => "start".to_string(),
@@ -346,7 +346,7 @@ impl Runtime {
                             });
                         }
                         Output::Note(text) => {
-                            if std::env::var("BOOSTSEARCH_CLUSTER_DEBUG").is_ok() {
+                            if std::env::var("VELOSEARCH_CLUSTER_DEBUG").is_ok() {
                                 eprintln!("cluster {me}: {text}");
                             }
                         }

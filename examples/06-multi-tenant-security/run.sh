@@ -9,9 +9,9 @@ IDX=tickets
 as() { # as USER PASS METHOD PATH [BODY]
   local u=$1 p=$2 m=$3 path=$4 b=${5-}
   if [ -n "$b" ]; then
-    curl -sS -u "$u:$p" -X "$m" "$BS$path" -H 'Content-Type: application/json' -d "$b"
+    curl -sS -u "$u:$p" -X "$m" "$VS$path" -H 'Content-Type: application/json' -d "$b"
   else
-    curl -sS -u "$u:$p" -X "$m" "$BS$path"
+    curl -sS -u "$u:$p" -X "$m" "$VS$path"
   fi
   echo
 }

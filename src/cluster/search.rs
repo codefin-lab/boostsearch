@@ -597,7 +597,7 @@ pub fn run_spanning(
     let mut skipped = 0u64;
     let mut failures: Vec<Value> = Vec::new();
     let mut fruits: Vec<
-        boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults,
+        velocore::aggregation::intermediate_agg_result::IntermediateAggregationResults,
     > = Vec::new();
     let mut native: Option<crate::search::NativeParts> = None;
     let mut suggest: Option<Value> = None;
@@ -715,7 +715,7 @@ pub fn run_spanning(
         a
     });
     let n = native.unwrap_or_default();
-    let agg_req: Option<boostcore::aggregation::agg_req::Aggregations> =
+    let agg_req: Option<velocore::aggregation::agg_req::Aggregations> =
         n.agg_req.and_then(|v| serde_json::from_value(v).ok());
     let agg_json = body.get("aggs").or_else(|| body.get("aggregations")).cloned();
     let partitions: Vec<(String, i64, i64, usize)> =

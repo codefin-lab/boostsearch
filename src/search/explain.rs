@@ -1,15 +1,15 @@
 //! Where a score came from, told the way Lucene tells it.
 //!
-//! BoostCore can say how it scored a document -- the idf, the tf, and what
+//! VeloCore can say how it scored a document -- the idf, the tf, and what
 //! they were made of. What it says is re-worded here into the tree OpenSearch
 //! writes, down to the `weight(field:term in doc) [PerFieldSimilarity]` head
 //! that names the term the leaf was scored for.
 
 use super::*;
-use boostcore::Term;
-use boostcore::collector::TopDocs;
-use boostcore::query::{Query, TermQuery};
-use boostcore::schema::IndexRecordOption;
+use velocore::Term;
+use velocore::collector::TopDocs;
+use velocore::query::{Query, TermQuery};
+use velocore::schema::IndexRecordOption;
 
 /// The explanation of one document's score under a query.
 pub(crate) fn explain_document(g: &IdxState, query: &Value, id: &str) -> Option<Value> {
@@ -131,9 +131,9 @@ fn collapsed(mut node: Value) -> Value {
     node
 }
 
-/// BoostCore's wording, rewritten into Lucene's.
+/// VeloCore's wording, rewritten into Lucene's.
 fn reword(node: &mut Value, leaves: &mut impl Iterator<Item = String>, doc: u32) {
-    // what BoostCore notes for itself about a leaf is not part of the answer
+    // what VeloCore notes for itself about a leaf is not part of the answer
     if let Some(o) = node.as_object_mut() {
         o.remove("context");
     }

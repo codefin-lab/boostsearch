@@ -1,6 +1,6 @@
 //! The search path: query execution, hit assembly, sorting and aggregations.
 //!
-//! Aggregation requests are handed to BoostCore almost untouched -- its
+//! Aggregation requests are handed to VeloCore almost untouched -- its
 //! aggregation JSON already matches OpenSearch's -- after rewriting each
 //! `field` onto the JSON view that backs it.
 
@@ -9,15 +9,15 @@ use crate::query::{Ctx, View};
 use crate::store::{IdxState, Store};
 use axum::http::StatusCode;
 use axum::response::Response;
-use boostcore::aggregation::AggContextParams;
-use boostcore::aggregation::DistributedAggregationCollector;
-use boostcore::aggregation::agg_req::Aggregations;
-use boostcore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
-use boostcore::collector::{Count, TopDocs};
-use boostcore::schema::Value as _;
-use boostcore::{DocAddress, Searcher, TantivyDocument};
 use serde_json::{Value, json};
 use std::cmp::Ordering;
+use velocore::aggregation::AggContextParams;
+use velocore::aggregation::DistributedAggregationCollector;
+use velocore::aggregation::agg_req::Aggregations;
+use velocore::aggregation::intermediate_agg_result::IntermediateAggregationResults;
+use velocore::collector::{Count, TopDocs};
+use velocore::schema::Value as _;
+use velocore::{DocAddress, Searcher, TantivyDocument};
 
 pub(crate) mod request_cache;
 pub(crate) use request_cache::RequestCache;
@@ -146,9 +146,9 @@ pub(crate) struct SortKey {
 /// One segment's readers for one sort field: the strings, the numbers, and
 /// which of the two the column turned out to be.
 type SegmentColumn = (
-    Option<boostcore::columnar::StrColumn>,
-    Option<boostcore::columnar::Column<u64>>,
-    Option<boostcore::columnar::ColumnType>,
+    Option<velocore::columnar::StrColumn>,
+    Option<velocore::columnar::Column<u64>>,
+    Option<velocore::columnar::ColumnType>,
 );
 
 /// Per-segment readers for one sort field, opened once and reused.
@@ -158,7 +158,7 @@ struct SortColumns {
 
 impl SortColumns {
     /// Open the readers for a single segment.
-    fn for_segment(reader: &boostcore::SegmentReader, column: &str) -> SortColumns {
+    fn for_segment(reader: &velocore::SegmentReader, column: &str) -> SortColumns {
         let ff = reader.fast_fields();
         let str_col = ff.str(column).ok().flatten();
         let (num_col, ty) = match ff.u64_lenient(column) {
@@ -169,7 +169,7 @@ impl SortColumns {
     }
 
     /// Every numeric value a document holds for this column.
-    fn numeric_values(&self, doc: boostcore::DocId) -> Vec<f64> {
+    fn numeric_values(&self, doc: velocore::DocId) -> Vec<f64> {
         let Some((_, num, ty)) = self.per_segment.first() else { return Vec::new() };
         let (Some(col), Some(ty)) = (num, ty) else { return Vec::new() };
         col.values_for_doc(doc)
@@ -178,7 +178,7 @@ impl SortColumns {
     }
 
     /// Read the value for a document inside the segment this was opened for.
-    fn read(&self, doc: boostcore::DocId, desc: bool, mode: Option<&str>) -> SortValue {
+    fn read(&self, doc: velocore::DocId, desc: bool, mode: Option<&str>) -> SortValue {
         self.value(DocAddress::new(0, doc), desc, mode)
     }
 
@@ -190,13 +190,13 @@ impl SortColumns {
         if let (Some(num), Some(ty)) = (num_col, ty) {
             let mut vals: Vec<SortValue> = Vec::new();
             for raw in num.values_for_doc(addr.doc_id) {
-                use boostcore::columnar::ColumnType;
+                use velocore::columnar::ColumnType;
                 let decoded = match ty {
                     ColumnType::I64 | ColumnType::DateTime => Some(SortValue::I64(
-                        boostcore::columnar::MonotonicallyMappableToU64::from_u64(raw),
+                        velocore::columnar::MonotonicallyMappableToU64::from_u64(raw),
                     )),
                     ColumnType::F64 => Some(SortValue::F64(
-                        <f64 as boostcore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
+                        <f64 as velocore::columnar::MonotonicallyMappableToU64>::from_u64(raw),
                     )),
                     ColumnType::U64 => Some(SortValue::U64(raw)),
                     ColumnType::Bool => Some(SortValue::I64(raw as i64)),
@@ -271,18 +271,18 @@ struct SortSegmentCollector {
     cutoff: Option<SortValue>,
     /// Set when the whole sort is one numeric column, which lets a block of
     /// documents be read from the columnar in one call instead of one at a time.
-    block: Option<boostcore::columnar::ColumnBlockAccessor<u64>>,
+    block: Option<velocore::columnar::ColumnBlockAccessor<u64>>,
 }
 
-impl boostcore::collector::Collector for SortCollector {
+impl velocore::collector::Collector for SortCollector {
     type Fruit = Vec<Cand>;
     type Child = SortSegmentCollector;
 
     fn for_segment(
         &self,
         segment_ord: u32,
-        reader: &boostcore::SegmentReader,
-    ) -> boostcore::Result<Self::Child> {
+        reader: &velocore::SegmentReader,
+    ) -> velocore::Result<Self::Child> {
         let columns: Vec<Option<SortColumns>> = self
             .sources
             .iter()
@@ -291,8 +291,8 @@ impl boostcore::collector::Collector for SortCollector {
                 _ => None,
             })
             .collect();
-        // BOOSTSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
-        let single_numeric = std::env::var("BOOSTSEARCH_NO_BLOCK_SORT").is_err()
+        // VELOSEARCH_NO_BLOCK_SORT=1 disables the vectorised path, for A/B runs
+        let single_numeric = std::env::var("VELOSEARCH_NO_BLOCK_SORT").is_err()
             && self.sources.len() == 1
             && matches!(self.sources[0], SortSource::Column { ref mode, .. } if mode.is_none())
             && columns
@@ -324,7 +324,7 @@ impl boostcore::collector::Collector for SortCollector {
         self.sources.iter().any(|s| matches!(s, SortSource::Score))
     }
 
-    fn merge_fruits(&self, children: Vec<Vec<Cand>>) -> boostcore::Result<Self::Fruit> {
+    fn merge_fruits(&self, children: Vec<Vec<Cand>>) -> velocore::Result<Self::Fruit> {
         let mut out: Vec<Cand> = children.into_iter().flatten().collect();
         prune_by(&mut out, self.limit, &self.desc);
         Ok(out)
@@ -332,7 +332,7 @@ impl boostcore::collector::Collector for SortCollector {
 }
 
 impl SortSegmentCollector {
-    fn read_key(&self, i: usize, doc: boostcore::DocId, score: boostcore::Score) -> SortValue {
+    fn read_key(&self, i: usize, doc: velocore::DocId, score: velocore::Score) -> SortValue {
         match &self.sources[i] {
             SortSource::Score => SortValue::F64(score as f64),
             // `_doc` is the document's place in the shard, not its place in
@@ -362,12 +362,12 @@ impl SortSegmentCollector {
     }
 }
 
-impl boostcore::collector::SegmentCollector for SortSegmentCollector {
+impl velocore::collector::SegmentCollector for SortSegmentCollector {
     type Fruit = Vec<Cand>;
 
     /// Vectorised path: for a single numeric sort key the whole block of
     /// matching documents is pulled out of the columnar in one call.
-    fn collect_block(&mut self, docs: &[boostcore::DocId]) {
+    fn collect_block(&mut self, docs: &[velocore::DocId]) {
         if self.block.is_none() {
             for &d in docs {
                 self.collect(d, 0.0);
@@ -425,7 +425,7 @@ impl boostcore::collector::SegmentCollector for SortSegmentCollector {
         self.block = Some(block);
     }
 
-    fn collect(&mut self, doc: boostcore::DocId, score: boostcore::Score) {
+    fn collect(&mut self, doc: velocore::DocId, score: velocore::Score) {
         let first = self.read_key(0, doc, score);
         // cheap rejection before allocating anything for this document
         if let Some(cut) = &self.cutoff {
@@ -580,18 +580,18 @@ pub struct Outcome {
 /// A geo shape and `distance_feature` ask something the index cannot answer
 /// on its own: whether a point is inside a shape, how far a value is from an
 /// origin. The query put
-/// to BoostCore matches more widely than that, and the candidates it found are
+/// to VeloCore matches more widely than that, and the candidates it found are
 /// read back here and judged properly.
 type Searchers = [(String, Searcher, std::sync::Arc<crate::store::IdxLock>)];
 
 /// The aggregations a request asks for, sorted into who answers them.
 ///
-/// BoostCore answers what it can parse. What it cannot -- `filters`, a
+/// VeloCore answers what it can parse. What it cannot -- `filters`, a
 /// pipeline, an aggregation over a field no index has -- is peeled off here and
 /// computed a bucket at a time through the ordinary query path, and a pipeline
 /// that reads finished buckets is held back until there are buckets to read.
 pub(crate) struct AggPlan {
-    /// what is left for BoostCore to parse
+    /// what is left for VeloCore to parse
     request: Option<Value>,
     /// this engine's own, one filtered search per named bucket
     peeled: Vec<(String, Value)>,

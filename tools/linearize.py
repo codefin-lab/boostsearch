@@ -3,7 +3,7 @@
 
 Writers and readers work a small set of keys against whichever node,
 recording every operation's call and return time and outcome. Meanwhile
-the script cuts partitions (through each node's /_boost/chaos switch,
+the script cuts partitions (through each node's /_velo/chaos switch,
 which breaks the transport for real) and stops and continues processes
 (SIGSTOP/SIGCONT). At the end, every key's history is checked against a
 register: is there an order of the operations, consistent with their
@@ -172,16 +172,16 @@ def main():
         if kind == "partition":
             others = [i for i in range(len(nodes)) if i != victim]
             try:
-                call(f"http://{nodes[victim]}/_boost/chaos", "POST", {"cut": [names[i] for i in others]})
+                call(f"http://{nodes[victim]}/_velo/chaos", "POST", {"cut": [names[i] for i in others]})
                 for i in others:
-                    call(f"http://{nodes[i]}/_boost/chaos", "POST", {"cut": [names[victim]]})
+                    call(f"http://{nodes[i]}/_velo/chaos", "POST", {"cut": [names[victim]]})
             except Exception as e:  # noqa: BLE001
                 print("could not cut:", e, file=sys.stderr)
             hold = rng.uniform(4, 9)
             time.sleep(hold)
             for i in range(len(nodes)):
                 try:
-                    call(f"http://{nodes[i]}/_boost/chaos", "POST", {"heal": True})
+                    call(f"http://{nodes[i]}/_velo/chaos", "POST", {"heal": True})
                 except Exception:
                     pass
             windows.append((start - t0, time.monotonic() - t0, f"isolate {names[victim]}"))

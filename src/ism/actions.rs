@@ -18,7 +18,7 @@ use crate::store::Store;
 /// It is not a failure: a rollover waits for its conditions most of the time
 /// it is asked, and counting each wait against the retries spent them within
 /// three ticks and left the policy stuck for the life of the index.
-pub const NOT_YET: &str = "__boostsearch_not_yet";
+pub const NOT_YET: &str = "__velosearch_not_yet";
 
 pub fn run(store: &Store, index: &str, kind: &str, spec: &Value) -> Result<String, String> {
     let body = spec.get(kind).cloned().unwrap_or(json!({}));
@@ -66,7 +66,7 @@ pub fn run(store: &Store, index: &str, kind: &str, spec: &Value) -> Result<Strin
             // merge down to the count asked for, a batch at a time, the way
             // the `_forcemerge` endpoint does it
             loop {
-                let ids: Vec<boostcore::index::SegmentId> = g
+                let ids: Vec<velocore::index::SegmentId> = g
                     .index
                     .searchable_segment_metas()
                     .unwrap_or_default()

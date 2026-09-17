@@ -20,7 +20,7 @@ pub(crate) struct Tok {
 /// What the highlighters need to know about the index.
 pub(crate) struct Env<'a> {
     pub(crate) mapping: &'a crate::store::Mapping,
-    pub(crate) index: &'a boostcore::Index,
+    pub(crate) index: &'a velocore::Index,
     pub(crate) analysis: &'a crate::analysis::Registry,
 }
 

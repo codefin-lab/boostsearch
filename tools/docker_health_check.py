@@ -20,7 +20,7 @@ Four containers, each removed afterwards:
 No ports are published: everything is asked from inside the container, so
 this runs beside anything else without taking a port from it.
 
-    python3 tools/docker_health_check.py [--image boostsearch:r32]
+    python3 tools/docker_health_check.py [--image velosearch:r32]
 """
 
 import argparse
@@ -68,7 +68,7 @@ def inside(name, *cmd):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", default="boostsearch:r32")
+    ap.add_argument("--image", default="velosearch:r32")
     a = ap.parse_args()
 
     results = []
@@ -89,25 +89,25 @@ def main():
     certs.mkdir()
     for name in ("esnode.pem", "esnode-key.pem", "root-ca.pem"):
         shutil.copy(CERTS / name, certs / name)
-    (config / "boostsearch.yml").write_text(
+    (config / "velosearch.yml").write_text(
         "plugins.security.ssl.http.enabled: true\n"
-        "plugins.security.ssl.http.pemcert_filepath: /etc/boostsearch/certs/esnode.pem\n"
-        "plugins.security.ssl.http.pemkey_filepath: /etc/boostsearch/certs/esnode-key.pem\n"
-        "plugins.security.ssl.http.pemtrustedcas_filepath: /etc/boostsearch/certs/root-ca.pem\n"
+        "plugins.security.ssl.http.pemcert_filepath: /etc/velosearch/certs/esnode.pem\n"
+        "plugins.security.ssl.http.pemkey_filepath: /etc/velosearch/certs/esnode-key.pem\n"
+        "plugins.security.ssl.http.pemtrustedcas_filepath: /etc/velosearch/certs/root-ca.pem\n"
     )
 
-    single = ["-e", "BOOSTSEARCH_TRANSPORT_INSECURE=true"]
+    single = ["-e", "VELOSEARCH_TRANSPORT_INSECURE=true"]
     kinds = [
-        ("bs-off", ["-e", "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true", *single], "healthy"),
-        ("bs-auth", ["-e", "BOOSTSEARCH_DISABLED=false", *single], "healthy"),
-        ("bs-tls", ["-e", "BOOSTSEARCH_DISABLED=false", *single,
-                    "-v", f"{config}:/etc/boostsearch:ro"], "healthy"),
+        ("bs-off", ["-e", "VELOSEARCH_PLUGINS_SECURITY_DISABLED=true", *single], "healthy"),
+        ("bs-auth", ["-e", "VELOSEARCH_DISABLED=false", *single], "healthy"),
+        ("bs-tls", ["-e", "VELOSEARCH_DISABLED=false", *single,
+                    "-v", f"{config}:/etc/velosearch:ro"], "healthy"),
         # its two peers never come: no cluster manager, ever
-        ("bs-unready", ["-e", "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true",
-                        "-e", "BOOSTSEARCH_TRANSPORT_INSECURE=true",
-                        "-e", "BOOSTSEARCH_NODE_NAME=unready",
-                        "-e", "BOOSTSEARCH_DISCOVERY_SEED_HOSTS=10.255.255.1:9300,10.255.255.2:9300",
-                        "-e", "BOOSTSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES=unready,absent-1,absent-2"],
+        ("bs-unready", ["-e", "VELOSEARCH_PLUGINS_SECURITY_DISABLED=true",
+                        "-e", "VELOSEARCH_TRANSPORT_INSECURE=true",
+                        "-e", "VELOSEARCH_NODE_NAME=unready",
+                        "-e", "VELOSEARCH_DISCOVERY_SEED_HOSTS=10.255.255.1:9300,10.255.255.2:9300",
+                        "-e", "VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES=unready,absent-1,absent-2"],
          "unhealthy"),
     ]
 

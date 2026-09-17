@@ -42,7 +42,7 @@ It should produce 開く.
 
 Some encoders need rule files the node loads at start-up. See
 `docs/phonetic.md` in the repository; `make serve` points
-`BOOSTSEARCH_PHONETIC_RULES` at `/tmp/phonetic-rules`. The step tolerates the
+`VELOSEARCH_PHONETIC_RULES` at `/tmp/phonetic-rules`. The step tolerates the
 failure and continues.
 
 ## Phonetic search matches far too much

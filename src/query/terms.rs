@@ -94,9 +94,9 @@ pub(crate) fn term_for(field: Field, path: &str, v: &Value) -> Vec<Term> {
     }
 }
 
-pub fn parse_datetime(s: &str) -> Option<boostcore::DateTime> {
-    use boostcore::time::format_description::well_known::Rfc3339;
-    boostcore::time::OffsetDateTime::parse(s, &Rfc3339).ok().map(boostcore::DateTime::from_utc)
+pub fn parse_datetime(s: &str) -> Option<velocore::DateTime> {
+    use velocore::time::format_description::well_known::Rfc3339;
+    velocore::time::OffsetDateTime::parse(s, &Rfc3339).ok().map(velocore::DateTime::from_utc)
 }
 
 pub(crate) fn any_of(mut terms: Vec<Term>) -> Box<dyn Query> {

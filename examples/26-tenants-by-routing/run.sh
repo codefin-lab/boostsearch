@@ -13,7 +13,7 @@ LAST=$(mktemp)
 trap 'rm -f "$LAST"' EXIT
 call() {
   local want=$1 m=$2 p=$3 b=${4-} code
-  local args=(-sS -o "$LAST" -w '%{http_code}' -X "$m" "$BS$p")
+  local args=(-sS -o "$LAST" -w '%{http_code}' -X "$m" "$VS$p")
   [ -n "$AUTH" ] && args+=(-u "$AUTH")
   case "$b" in
     '')         ;;

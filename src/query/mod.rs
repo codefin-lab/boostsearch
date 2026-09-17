@@ -1,17 +1,17 @@
-//! OpenSearch query DSL -> BoostCore queries.
+//! OpenSearch query DSL -> VeloCore queries.
 
 use crate::store::{Fields, Mapping};
 use anyhow::{Result, anyhow};
-use boostcore::query::{
-    AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
-    FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
-};
-use boostcore::schema::{Field, IndexRecordOption, TantivyDocument, Term, Type, Value as _};
-use boostcore::{Index, TantivyError};
-use boostcore_fst::Regex;
 use serde_json::Value;
 use std::ops::Bound;
 use std::sync::Arc;
+use velocore::query::{
+    AllQuery, AutomatonWeight, BooleanQuery, BoostQuery, EmptyQuery, EnableScoring, ExistsQuery,
+    FuzzyTermQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
+};
+use velocore::schema::{Field, IndexRecordOption, TantivyDocument, Term, Type, Value as _};
+use velocore::{Index, TantivyError};
+use velocore_fst::Regex;
 
 mod dispatch;
 pub(crate) use dispatch::*;
@@ -229,7 +229,7 @@ impl Clone for JsonAutomatonQuery {
 }
 
 impl Query for JsonAutomatonQuery {
-    fn weight(&self, _s: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, _s: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         Ok(Box::new(AutomatonWeight::<Regex>::new_for_json_path(
             self.field,
             self.regex.clone(),
@@ -620,7 +620,7 @@ fn parse_range_token(value: &str) -> Option<Value> {
 
 /// A constant score over another query.
 ///
-/// BoostCore has one of these already, but its weight leaves `for_each_pruning`
+/// VeloCore has one of these already, but its weight leaves `for_each_pruning`
 /// to the blanket implementation, which walks every matching document. That
 /// throws away the block-skipping a term query would otherwise do, and a term
 /// query is exactly what gets wrapped here.
@@ -632,11 +632,11 @@ fn parse_range_token(value: &str) -> Option<Value> {
 /// is what the blanket implementation would have arrived at the slow way.
 pub struct ConstScore {
     query: Box<dyn Query>,
-    score: boostcore::Score,
+    score: velocore::Score,
 }
 
 impl ConstScore {
-    pub fn new(query: Box<dyn Query>, score: boostcore::Score) -> Self {
+    pub fn new(query: Box<dyn Query>, score: velocore::Score) -> Self {
         ConstScore { query, score }
     }
 }
@@ -654,7 +654,7 @@ impl Clone for ConstScore {
 }
 
 impl Query for ConstScore {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let inner = self.query.weight(enable_scoring)?;
         // with scoring off the score is never read, so the wrapper is pure cost
         Ok(if enable_scoring.is_scoring_enabled() {
@@ -671,40 +671,40 @@ impl Query for ConstScore {
 
 struct ConstWeight {
     inner: Box<dyn Weight>,
-    score: boostcore::Score,
+    score: velocore::Score,
 }
 
 impl Weight for ConstWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let inner = self.inner.scorer(reader, boost)?;
-        Ok(Box::new(boostcore::query::ConstScorer::new(inner, boost * self.score)))
+        Ok(Box::new(velocore::query::ConstScorer::new(inner, boost * self.score)))
     }
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
-        let mut ex = boostcore::query::Explanation::new("Const", self.score);
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
+        let mut ex = velocore::query::Explanation::new("Const", self.score);
         ex.add_detail(self.inner.explain(reader, doc)?);
         Ok(ex)
     }
 
-    fn count(&self, reader: &boostcore::SegmentReader) -> boostcore::Result<u32> {
+    fn count(&self, reader: &velocore::SegmentReader) -> velocore::Result<u32> {
         self.inner.count(reader)
     }
 
     fn for_each_pruning(
         &self,
-        threshold: boostcore::Score,
-        reader: &boostcore::SegmentReader,
-        callback: &mut dyn FnMut(boostcore::DocId, boostcore::Score) -> boostcore::Score,
-    ) -> boostcore::Result<()> {
-        use boostcore::DocSet;
+        threshold: velocore::Score,
+        reader: &velocore::SegmentReader,
+        callback: &mut dyn FnMut(velocore::DocId, velocore::Score) -> velocore::Score,
+    ) -> velocore::Result<()> {
+        use velocore::DocSet;
         // nothing here can beat what the collector already holds
         if threshold >= self.score {
             return Ok(());
@@ -713,7 +713,7 @@ impl Weight for ConstWeight {
         // would compute is discarded, so ask for the cheaper unscored form
         let mut scorer = self.inner.scorer(reader, 1.0)?;
         let mut doc = scorer.doc();
-        while doc != boostcore::TERMINATED {
+        while doc != velocore::TERMINATED {
             if callback(doc, self.score) >= self.score {
                 return Ok(());
             }

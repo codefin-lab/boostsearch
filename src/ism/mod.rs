@@ -35,7 +35,7 @@ pub fn job_interval_ms(store: &Store) -> u64 {
         .cluster_setting("plugins.index_state_management.job_interval")
         .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
         .map(|minutes| minutes * 60_000)
-        .or_else(|| std::env::var("BOOSTSEARCH_ISM_INTERVAL_MS").ok().and_then(|v| v.parse().ok()))
+        .or_else(|| std::env::var("VELOSEARCH_ISM_INTERVAL_MS").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(5 * 60_000)
         // an interval of zero is a loop that looks at every index as fast as
         // the machine can, forever

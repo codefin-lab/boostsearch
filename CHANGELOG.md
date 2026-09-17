@@ -4,7 +4,7 @@
 
 Two numbers matter to somebody running this, and they are not the same number.
 
-- **The BoostSearch version** is this project's own, and follows semantic
+- **The VeloSearch version** is this project's own, and follows semantic
   versioning: a patch fixes something, a minor adds something, a major changes
   an answer somebody could have depended on.
 - **The OpenSearch version it answers as** is what `GET /` reports, and is the

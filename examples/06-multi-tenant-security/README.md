@@ -45,10 +45,10 @@ The longer form, and what this example needs of the node:
 Security is off by default, so this example needs a node started with it on:
 
 ```bash
-BOOSTSEARCH_DISABLED=false \
-BOOSTSEARCH_RESTAPI_ROLES_ENABLED=all_access \
-BOOSTSEARCH_DATA=/tmp/boost-security \
-./target/release/boostsearch &
+VELOSEARCH_DISABLED=false \
+VELOSEARCH_RESTAPI_ROLES_ENABLED=all_access \
+VELOSEARCH_DATA=/tmp/velo-security \
+./target/release/velosearch &
 
 examples/06-multi-tenant-security/run.sh
 ```

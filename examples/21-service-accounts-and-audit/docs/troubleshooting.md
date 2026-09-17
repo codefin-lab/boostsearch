@@ -2,7 +2,7 @@
 
 ## `run.sh` stops at once with `no server at ...`
 
-Either there is no node at `BS`, or security is on and the credentials are
+Either there is no node at `VS`, or security is on and the credentials are
 wrong: the first request is made with `AUTH`, and a 401 looks the same as no
 server to it. Start the node with `make serve`, and check `AUTH` (default
 `admin:admin`).
@@ -16,14 +16,14 @@ it on:
 make serve
 ```
 
-which sets `BOOSTSEARCH_DISABLED=false` and
-`BOOSTSEARCH_RESTAPI_ROLES_ENABLED=all_access`. If you are using your own node,
+which sets `VELOSEARCH_DISABLED=false` and
+`VELOSEARCH_RESTAPI_ROLES_ENABLED=all_access`. If you are using your own node,
 start it with both.
 
 ## `PUT /_plugins/_security/api/...` returns 403 for the administrator
 
 The administrator's role is not allowed to use the security REST API.
-`BOOSTSEARCH_RESTAPI_ROLES_ENABLED` names the roles that may; it must include
+`VELOSEARCH_RESTAPI_ROLES_ENABLED` names the roles that may; it must include
 `all_access` for this example.
 
 ## Creating a user fails with `Password is similar to user name`
@@ -82,7 +82,7 @@ users with their original passwords.
 ## Steps 15-19 find nothing
 
 - **The audit log is going somewhere else.** Step 1 shows the configuration but
-  not the sink; check how the node was started. `BOOSTSEARCH_AUDIT_TYPE` must be
+  not the sink; check how the node was started. `VELOSEARCH_AUDIT_TYPE` must be
   `internal_opensearch` for the entries to be in `security-auditlog-*`. With
   `log4j` or `debug` they are on the node's standard error instead, one line
   each, beginning `[INFO][audit]` or `AUDIT`.

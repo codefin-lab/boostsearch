@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What OpenSearch answers a query with, and what BoostSearch answers.
+"""What OpenSearch answers a query with, and what VeloSearch answers.
 
 Indexes the same small set of documents into both servers, then runs every
 query and aggregation shape the corpus names against both and reports where
@@ -11,7 +11,7 @@ import json, sys, urllib.request, urllib.error
 
 import os
 A = ("OpenSearch", os.environ.get("DIFF_A", "http://127.0.0.1:9299"))
-B = ("BoostSearch", os.environ.get("DIFF_B", "http://127.0.0.1:9200"))
+B = ("VeloSearch", os.environ.get("DIFF_B", "http://127.0.0.1:9200"))
 INDEX = "diff"
 
 MAPPING = {
@@ -222,7 +222,7 @@ def main():
     if show:
         for label, theirs, ours in differences:
             print(f"{label}\n    OpenSearch  {json.dumps(theirs)[:220]}\n"
-                  f"    BoostSearch {json.dumps(ours)[:220]}")
+                  f"    VeloSearch {json.dumps(ours)[:220]}")
     print(f"\n{same} of {len(cases)} identical  ({100 * same / len(cases):.1f}%)")
     return 0 if not differences else 1
 

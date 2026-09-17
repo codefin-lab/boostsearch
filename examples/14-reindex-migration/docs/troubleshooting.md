@@ -63,7 +63,7 @@ shards to move.
 The source host must be allowed. Start the node with:
 
 ```bash
-BOOSTSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' ./target/release/boostsearch
+VELOSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' ./target/release/velosearch
 ```
 
 `make serve` does this. Without it, only that one step fails.

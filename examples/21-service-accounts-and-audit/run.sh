@@ -4,7 +4,7 @@
 
 # with no .env, the node `make serve` starts; anything in .env or the
 # environment wins
-[ -f "$(dirname "$0")/.env" ] || { BS="${BS:-http://127.0.0.1:9281}"; AUTH="${AUTH:-admin:admin}"; }
+[ -f "$(dirname "$0")/.env" ] || { VS="${VS:-http://127.0.0.1:9281}"; AUTH="${AUTH:-admin:admin}"; }
 source "$(dirname "$0")/lib.sh"
 
 IDX=orders-2026.09
@@ -29,7 +29,7 @@ expect_status() {
 # whatever the status, and the status is checked against WANT.
 as() {
   local who=$1 want=$2 m=$3 p=$4 b=${5-} code
-  local args=(-sS -o "$LAST" -w '%{http_code}' -u "$who" -X "$m" "$BS$p")
+  local args=(-sS -o "$LAST" -w '%{http_code}' -u "$who" -X "$m" "$VS$p")
   case "$b" in
     '')            ;;
     @*.ndjson)     args+=(-H 'Content-Type: application/x-ndjson' --data-binary "$b") ;;
@@ -174,7 +174,7 @@ step "the audit log: what happened during this run, by category and by caller"
 # expects -- the ingest service's old password, refused in step 14
 for i in $(seq 1 20); do
   quiet POST "/security-auditlog-*/_refresh"
-  n=$("${CURL[@]}" -X POST "$BS/security-auditlog-*/_count" -H 'Content-Type: application/json' -d "{
+  n=$("${CURL[@]}" -X POST "$VS/security-auditlog-*/_count" -H 'Content-Type: application/json' -d "{
     \"query\": { \"bool\": { \"filter\": [ $(since),
       { \"term\": { \"audit_category.keyword\": \"FAILED_LOGIN\" } },
       { \"term\": { \"audit_request_effective_user.keyword\": \"svc-ingest\" } } ] } } }" \

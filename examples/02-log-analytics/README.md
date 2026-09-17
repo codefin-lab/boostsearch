@@ -44,7 +44,7 @@ The policy only moves when the ISM job runs, so start the server with a short
 interval or the last steps will just show the first index:
 
 ```bash
-BOOSTSEARCH_ISM_INTERVAL_MS=2000 ./target/release/boostsearch &
+VELOSEARCH_ISM_INTERVAL_MS=2000 ./target/release/velosearch &
 examples/02-log-analytics/run.sh
 ```
 

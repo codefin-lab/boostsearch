@@ -49,8 +49,8 @@ import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PORT = int(os.environ.get("BOOST_SEC_PORT", "9368"))
-TRANSPORT = int(os.environ.get("BOOST_SEC_TRANSPORT", "9468"))
+PORT = int(os.environ.get("VELO_SEC_PORT", "9368"))
+TRANSPORT = int(os.environ.get("VELO_SEC_TRANSPORT", "9468"))
 LAX = ssl._create_unverified_context()
 
 
@@ -93,17 +93,17 @@ def scrub(v):
 
 
 class Node:
-    """A security-enabled BoostSearch, started as the docs describe."""
+    """A security-enabled VeloSearch, started as the docs describe."""
 
     def __init__(self, binary, data, log):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("BOOSTSEARCH_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VELOSEARCH_")}
         env.update({
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{PORT}",
-            "BOOSTSEARCH_DATA": str(data),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(TRANSPORT),
-            "BOOSTSEARCH_TRANSPORT_INSECURE": "true",
-            "BOOSTSEARCH_DISABLED": "false",
-            "BOOSTSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+            "VELOSEARCH_ADDR": f"127.0.0.1:{PORT}",
+            "VELOSEARCH_DATA": str(data),
+            "VELOSEARCH_TRANSPORT_PORT": str(TRANSPORT),
+            "VELOSEARCH_TRANSPORT_INSECURE": "true",
+            "VELOSEARCH_DISABLED": "false",
+            "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
         })
         self.log = open(log, "ab")
         self.proc = subprocess.Popen([binary], env=env, stdout=self.log, stderr=subprocess.STDOUT)
@@ -251,9 +251,9 @@ def questions(user_password):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target/release/boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target/release/velosearch"))
     ap.add_argument("--ref", default="https://127.0.0.1:9253")
-    ap.add_argument("--ref-password", default=os.environ.get("BOOST_REF_PASSWORD", ""))
+    ap.add_argument("--ref-password", default=os.environ.get("VELO_REF_PASSWORD", ""))
     ap.add_argument("--user-password", default="Zq7-mesa-lantern-42")
     ap.add_argument("--show", type=int, default=8, help="how many differences to print in full")
     ap.add_argument("--keep", action="store_true")

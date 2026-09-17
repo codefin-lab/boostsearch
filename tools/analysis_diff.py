@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What OpenSearch makes of a text, and what BoostSearch makes of the same one.
+"""What OpenSearch makes of a text, and what VeloSearch makes of the same one.
 
 Runs every built-in analyzer, tokenizer and filter the corpus names over a
 handful of texts against both servers and reports where the token streams
@@ -10,7 +10,7 @@ import json, sys, urllib.request
 
 import os
 A = os.environ.get("DIFF_A", "http://127.0.0.1:9299")   # OpenSearch
-B = os.environ.get("DIFF_B", "http://127.0.0.1:9200")   # BoostSearch
+B = os.environ.get("DIFF_B", "http://127.0.0.1:9200")   # VeloSearch
 
 TEXTS = [
     "The quick brown foxes jumped over the lazy dogs",
@@ -74,7 +74,7 @@ def main():
         else:
             differences.append((label, body["text"], theirs, ours))
     for label, text, theirs, ours in differences if show else []:
-        print(f"{label:<34} {text!r}\n    OpenSearch  {theirs}\n    BoostSearch {ours}")
+        print(f"{label:<34} {text!r}\n    OpenSearch  {theirs}\n    VeloSearch {ours}")
     print(f"\n{same} of {len(cases)} identical  ({100 * same / len(cases):.1f}%)")
     return 0 if not differences else 1
 

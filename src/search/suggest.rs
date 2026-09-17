@@ -187,8 +187,8 @@ pub(crate) fn completion_suggest(
         let Some(st) = store.get(name) else { continue };
         let g = st.read();
         let searcher = g.reader.searcher();
-        let all = boostcore::query::AllQuery;
-        let addrs = searcher.search(&all, &boostcore::collector::DocSetCollector).map_err(|e| {
+        let all = velocore::query::AllQuery;
+        let addrs = searcher.search(&all, &velocore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
         })?;
         for addr in addrs {
@@ -311,8 +311,8 @@ pub(crate) fn term_suggest(
         let Some(st) = store.get(name) else { continue };
         let g = st.read();
         let searcher = g.reader.searcher();
-        let all = boostcore::query::AllQuery;
-        let Ok(addrs) = searcher.search(&all, &boostcore::collector::DocSetCollector) else {
+        let all = velocore::query::AllQuery;
+        let Ok(addrs) = searcher.search(&all, &velocore::collector::DocSetCollector) else {
             continue;
         };
         for addr in addrs {

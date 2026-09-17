@@ -232,12 +232,12 @@ pub(crate) fn run_range_field_histogram(
     Ok(json!({"buckets": buckets}))
 }
 
-/// A `histogram` or a `range` over an ordinary field, run through BoostCore
+/// A `histogram` or a `range` over an ordinary field, run through VeloCore
 /// from here rather than as part of the whole request.
 ///
 /// It lands here when something under it is run a bucket at a time, which
 /// `filtered_count` takes care of, or when it names a `missing` value, which
-/// BoostCore does not read. Those were answered as a histogram over a range
+/// VeloCore does not read. Those were answered as a histogram over a range
 /// field and as a `filters` with no filters, which is to say with no buckets
 /// and with a refusal. A document with no value stands in with the `missing`
 /// one, so it belongs to whichever bucket that value falls in: the bucket is
@@ -257,7 +257,7 @@ pub(crate) fn run_native_bucket_agg(
     if let Some(o) = native.get_mut(kind).and_then(|s| s.as_object_mut()) {
         o.remove("missing");
     }
-    // the keys and counts are BoostCore's; only the name is needed to find them
+    // the keys and counts are VeloCore's; only the name is needed to find them
     let label = if name.is_empty() { "__native" } else { name };
     let query = main_query.clone().unwrap_or_else(|| json!({"match_all": {}}));
     let request = json!({ label: native });

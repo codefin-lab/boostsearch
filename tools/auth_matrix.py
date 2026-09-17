@@ -230,18 +230,18 @@ def fixtures(url):
 
 def start_node(binary, port, transport):
     """A node with security on and the default users, in a directory of its own."""
-    data = tempfile.mkdtemp(prefix="boost-auth-")
+    data = tempfile.mkdtemp(prefix="velo-auth-")
     config = pathlib.Path(data) / "config"
     (config / "security").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{port}",
-            "BOOSTSEARCH_DATA": data,
-            "BOOSTSEARCH_CONFIG": str(config),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(transport),
-            "BOOSTSEARCH_DISABLED": "false",
-            "BOOSTSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+            "VELOSEARCH_ADDR": f"127.0.0.1:{port}",
+            "VELOSEARCH_DATA": data,
+            "VELOSEARCH_CONFIG": str(config),
+            "VELOSEARCH_TRANSPORT_PORT": str(transport),
+            "VELOSEARCH_DISABLED": "false",
+            "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
         }
     )
     log = open(pathlib.Path(data) / "node.log", "w")
@@ -261,7 +261,7 @@ def start_node(binary, port, transport):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "velosearch"))
     ap.add_argument("--port", type=int, default=9269)
     ap.add_argument("--transport", type=int, default=9369)
     ap.add_argument("--write-baseline", action="store_true")

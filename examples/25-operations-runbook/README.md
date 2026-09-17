@@ -41,7 +41,7 @@ operator makes and must then undo.
 | 18 | `_cache/clear`, `_flush`, `_refresh`, and what each one is for |
 | 19 | `index.search.slowlog.threshold.*` and `index.search.slowlog.level` |
 | 20 | `_stats` per index, narrowed with metrics and `filter_path` |
-| 21 | `_nodes/stats/indices`, and `_boostsearch/memory` for the process's memory |
+| 21 | `_nodes/stats/indices`, and `_velosearch/memory` for the process's memory |
 | 22 | `_cluster/pending_tasks` |
 | 23 | `_tasks` |
 | 24 | what is left behind, checked |
@@ -60,8 +60,8 @@ make run        # the example, in another terminal
 The longer form:
 
 ```bash
-BOOSTSEARCH_ADDR=127.0.0.1:9285 BOOSTSEARCH_TRANSPORT_PORT=9385 ./target/release/boostsearch &
-BS=http://127.0.0.1:9285 examples/25-operations-runbook/run.sh
+VELOSEARCH_ADDR=127.0.0.1:9285 VELOSEARCH_TRANSPORT_PORT=9385 ./target/release/velosearch &
+VS=http://127.0.0.1:9285 examples/25-operations-runbook/run.sh
 ```
 
 It needs a node on its own. On a cluster with a second data node, the replica
@@ -73,7 +73,7 @@ in step 1 would be placed and steps 2 to 10 would have nothing to diagnose.
   The answer is not a colour but a status code:
 
   ```
-  {"cluster_name":"boostsearch","status":"yellow","timed_out":true, ...}
+  {"cluster_name":"velosearch","status":"yellow","timed_out":true, ...}
      HTTP 408
   ```
 
@@ -146,7 +146,7 @@ where it runs:
   where OpenSearch prints stack frames this node prints each thread's run
   state.
 - `_nodes/stats` `jvm` reports what the allocator holds as the heap: there is
-  no JVM. Step 21 reads `_boostsearch/memory` for the allocator's own view.
+  no JVM. Step 21 reads `_velosearch/memory` for the allocator's own view.
 
 `docs/troubleshooting.md` has the detail of each, and what to use in the
 meantime.

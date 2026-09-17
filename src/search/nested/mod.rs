@@ -237,7 +237,7 @@ pub(crate) fn objects_agg(
                 .map(|(key, list)| {
                     let mut b = json!({"key": key, "doc_count": list.len()});
                     if dated
-                        && let Ok(at) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+                        && let Ok(at) = velocore::time::OffsetDateTime::from_unix_timestamp_nanos(
                             key as i128 * 1_000_000,
                         )
                     {
@@ -373,7 +373,7 @@ fn bucket_key(spec: &Value, n: f64, dated: bool) -> Option<i64> {
             .and_then(|v| v.as_str())
             .and_then(crate::search::calendar::CalendarUnit::parse)
         {
-            let at = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+            let at = velocore::time::OffsetDateTime::from_unix_timestamp_nanos(
                 (n * 1_000_000.0) as i128,
             )
             .ok()?;
@@ -399,9 +399,9 @@ pub(crate) fn number_of(v: &Value) -> Option<f64> {
         Value::Number(n) => n.as_f64(),
         // read the text as written: folding it through the resolution the
         // index keeps would wrap a date far enough out
-        Value::String(s) => boostcore::time::OffsetDateTime::parse(
+        Value::String(s) => velocore::time::OffsetDateTime::parse(
             s,
-            &boostcore::time::format_description::well_known::Rfc3339,
+            &velocore::time::format_description::well_known::Rfc3339,
         )
         .ok()
         .map(|d| d.unix_timestamp_nanos() as f64)

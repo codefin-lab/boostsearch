@@ -23,7 +23,7 @@ pub(crate) fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
             let sub = build(ctx, &item)?;
             // A clause that matches every document of a segment -- a range
             // covering all its values, an `exists` on a full column,
-            // `match_all` -- hands BoostCore's boolean an all-documents scorer,
+            // `match_all` -- hands VeloCore's boolean an all-documents scorer,
             // which it drops from the intersection as an optimisation and
             // with it the clause's score: `must: range` beside a filter
             // scored 1.0 in one segment and 0.0 in the next, where the
@@ -41,7 +41,7 @@ pub(crate) fn build_bool(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query>> {
                     })
                     .and_then(|b| b.as_f64())
                     .unwrap_or(1.0);
-                Some(boost as boostcore::Score)
+                Some(boost as velocore::Score)
             });
             let sub: Box<dyn Query> = match whole_segment {
                 _ if key == "filter" => Box::new(ConstScore::new(sub, 0.0)),

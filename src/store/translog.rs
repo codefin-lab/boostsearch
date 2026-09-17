@@ -183,7 +183,7 @@ impl IdxState {
         crate::search::routing_shard_in(
             routing,
             self.shard_count().max(1),
-            self.numeric_setting("boost_routing_shards"),
+            self.numeric_setting("velo_routing_shards"),
         )
     }
 
@@ -205,7 +205,7 @@ impl IdxState {
     /// the id's hash folded into the partition size.
     pub fn shard_of(&self, id: &str, routing: Option<&str>) -> u64 {
         let shards = self.shard_count().max(1);
-        let rns = self.numeric_setting("boost_routing_shards");
+        let rns = self.numeric_setting("velo_routing_shards");
         match routing {
             None => crate::search::routing_shard_in(id, shards, rns),
             Some(r) => {
@@ -223,7 +223,7 @@ impl IdxState {
     /// per partition in a partitioned index.
     pub fn shards_for_routing(&self, routing: &str) -> std::collections::BTreeSet<u64> {
         let shards = self.shard_count().max(1);
-        let rns = self.numeric_setting("boost_routing_shards");
+        let rns = self.numeric_setting("velo_routing_shards");
         (0..self.partition_size())
             .map(|offset| crate::search::routing_shard_offset(routing, offset as i32, shards, rns))
             .collect()
@@ -232,10 +232,10 @@ impl IdxState {
     /// The query clause that keeps a search to the documents these shards
     /// hold, carrying the fold it has to redo per document.
     pub fn on_shards_filter(&self, shards: &std::collections::BTreeSet<u64>) -> Value {
-        serde_json::json!({"_bs_on_shards": {
+        serde_json::json!({"_vs_on_shards": {
             "shards": shards.iter().collect::<Vec<_>>(),
             "of": self.shard_count().max(1),
-            "routing_shards": self.numeric_setting("boost_routing_shards"),
+            "routing_shards": self.numeric_setting("velo_routing_shards"),
             "partition": self.partition_size(),
         }})
     }
@@ -336,7 +336,7 @@ impl IdxState {
             let done = match op {
                 PendingOp::Add(doc) => w.add_document(*doc).map(|_| ()),
                 PendingOp::Delete(id) => {
-                    w.delete_term(boostcore::Term::from_field_text(id_field, &id));
+                    w.delete_term(velocore::Term::from_field_text(id_field, &id));
                     Ok(())
                 }
             };

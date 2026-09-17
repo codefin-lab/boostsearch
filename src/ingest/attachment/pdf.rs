@@ -1789,19 +1789,19 @@ fn pdf_date(raw: &str) -> Option<String> {
         }
         _ => 0,
     };
-    let date = boostcore::time::Date::from_calendar_date(
+    let date = velocore::time::Date::from_calendar_date(
         year as i32,
-        boostcore::time::Month::try_from(month.clamp(1, 12) as u8).ok()?,
+        velocore::time::Month::try_from(month.clamp(1, 12) as u8).ok()?,
         day.clamp(1, 31) as u8,
     )
     .ok()?;
-    let time = boostcore::time::Time::from_hms(
+    let time = velocore::time::Time::from_hms(
         hour.clamp(0, 23) as u8,
         minute.clamp(0, 59) as u8,
         second.clamp(0, 59) as u8,
     )
     .ok()?;
-    let at = boostcore::time::PrimitiveDateTime::new(date, time).assume_utc();
+    let at = velocore::time::PrimitiveDateTime::new(date, time).assume_utc();
     let millis = (at.unix_timestamp() - offset_minutes * 60) * 1000;
     crate::store::format_millis(millis, "yyyy-MM-dd'T'HH:mm:ss'Z'")
 }

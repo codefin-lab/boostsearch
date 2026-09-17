@@ -1,4 +1,4 @@
-//! One query name to one BoostCore query: the whole of the query DSL, in
+//! One query name to one VeloCore query: the whole of the query DSL, in
 //! the order OpenSearch documents it.
 
 use super::*;
@@ -34,7 +34,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
         }
         "match_none" => Box::new(EmptyQuery),
         // the documents some shards hold, for a search narrowed to them
-        "_bs_on_shards" => Box::new(OnShards::from_json(&body)?),
+        "_vs_on_shards" => Box::new(OnShards::from_json(&body)?),
         "script" => {
             let Some(spec) = body.get("script") else {
                 return Err(anyhow!(
@@ -744,7 +744,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
             // the best clause counts whole and the others by `tie_breaker`;
             // it was read nowhere, so only the best clause ever counted
             let tie = body.get("tie_breaker").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-            Box::new(boostcore::query::DisjunctionMaxQuery::with_tie_breaker(subs?, tie))
+            Box::new(velocore::query::DisjunctionMaxQuery::with_tie_breaker(subs?, tie))
         }
         other => {
             // a near-miss is usually a typo, and saying which name was meant
@@ -855,7 +855,7 @@ pub fn build(ctx: &Ctx, q: &Value) -> Result<Box<dyn Query>> {
 /// a complaint about the name rather than about the text.
 pub(crate) fn unknown_clause(name: &str) -> bool {
     const CLAUSES: &[&str] = &[
-        "_bs_on_shards",
+        "_vs_on_shards",
         "bool",
         "boosting",
         "combined_fields",
@@ -922,9 +922,9 @@ pub(crate) fn unknown_clause(name: &str) -> bool {
 fn ids_matching(ctx: &Ctx, filter: &Value) -> Result<std::collections::HashSet<String>> {
     let query = super::build(ctx, filter)?;
     let reader =
-        ctx.index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
-    let searcher: boostcore::Searcher = reader.searcher();
-    let found = searcher.search(&query, &boostcore::collector::DocSetCollector)?;
+        ctx.index.reader_builder().reload_policy(velocore::ReloadPolicy::Manual).try_into()?;
+    let searcher: velocore::Searcher = reader.searcher();
+    let found = searcher.search(&query, &velocore::collector::DocSetCollector)?;
     let mut out = std::collections::HashSet::with_capacity(found.len());
     for address in found {
         let Some(reader) = searcher.segment_readers().get(address.segment_ord as usize) else {

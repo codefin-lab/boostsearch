@@ -1,35 +1,35 @@
 [package]
-name = "boostsearch"
+name = "velosearch"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "An OpenSearch-compatible search server, on BoostCore"
-repository = "https://github.com/codefin-lab/boostsearch"
+description = "An OpenSearch-compatible search server, on VeloCore"
+repository = "https://github.com/codefin-lab/velosearch"
 readme = "README.md"
 keywords = ["search", "opensearch", "elasticsearch", "server"]
 categories = ["database-implementations"]
 
 [lib]
-name = "boostsearch"
+name = "velosearch"
 path = "src/lib.rs"
 
 [[bin]]
-name = "boostsearch"
+name = "velosearch"
 path = "src/main.rs"
 
 [dependencies]
 postcard = { version = "1.0", features = ["alloc"] }
-# BoostCore is the search library this is built on: a fork of tantivy that
-# lives at github.com/codefin-lab/boostcore, so it can be patched where the
+# VeloCore is the search library this is built on: a fork of tantivy that
+# lives at github.com/codefin-lab/velocore, so it can be patched where the
 # engine needs it to behave the way OpenSearch does. Pinned to a commit, so a
-# build is the same build tomorrow. See docs/boostcore.md.
+# build is the same build tomorrow. See docs/velocore.md.
 #
 # To work on the fork and this together, clone it beside this repo and add:
 #
-#     [patch."https://github.com/codefin-lab/boostcore"]
-#     boostcore = { path = "../boostcore" }
-#     boostcore-common = { path = "../boostcore/common" }
-boostcore = { git = "https://github.com/codefin-lab/boostcore", rev = "b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed", features = ["zstd-compression"] }
+#     [patch."https://github.com/codefin-lab/velocore"]
+#     velocore = { path = "../velocore" }
+#     velocore-common = { path = "../velocore/common" }
+velocore = { git = "https://github.com/codefin-lab/velocore", rev = "57fcb12c27736f95b98577f64616879b5c811b0b", features = ["zstd-compression"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -80,8 +80,8 @@ encoding_rs = "0.8"
 # The OLE2 container the older Office formats are written in. What is inside
 # it -- the Word streams -- is read in src/ingest/attachment/office.rs.
 cfb = "0.14"
-boostcore-fst = { package = "tantivy-fst", version = "0.5" }
-boostcore-common = { git = "https://github.com/codefin-lab/boostcore", rev = "b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed" }
+velocore-fst = { package = "tantivy-fst", version = "0.5" }
+velocore-common = { git = "https://github.com/codefin-lab/velocore", rev = "57fcb12c27736f95b98577f64616879b5c811b0b" }
 icu_normalizer = "2.3.0"
 icu_segmenter = { version = "2.3.0", features = ["auto"] }
 icu_properties = "2.3.0"

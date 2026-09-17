@@ -127,9 +127,9 @@ impl Source {
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use boostcore::TantivyDocument;
-use boostcore::schema::document::Value as _;
 use serde_json::{Value, json};
+use velocore::TantivyDocument;
+use velocore::schema::document::Value as _;
 
 use crate::store::{IdxState, Store};
 
@@ -150,14 +150,14 @@ fn climbs(relative: &str) -> bool {
 }
 
 pub fn repo_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("BOOSTSEARCH_PATH_REPO")
+    if let Ok(dir) = std::env::var("VELOSEARCH_PATH_REPO")
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
     }
-    match std::env::var("BOOSTSEARCH_DATA") {
+    match std::env::var("VELOSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("repo"),
-        _ => std::env::temp_dir().join("boostsearch-repo"),
+        _ => std::env::temp_dir().join("velosearch-repo"),
     }
 }
 

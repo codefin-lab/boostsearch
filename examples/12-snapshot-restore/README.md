@@ -37,15 +37,15 @@ The longer form, and what this example needs of the node:
 The node must be told where repositories may live:
 
 ```bash
-BOOSTSEARCH_PATH_REPO=/tmp/boost-repo \
-BOOSTSEARCH_DATA=/tmp/boost-snap \
-./target/release/boostsearch &
+VELOSEARCH_PATH_REPO=/tmp/velo-repo \
+VELOSEARCH_DATA=/tmp/velo-snap \
+./target/release/velosearch &
 
 examples/12-snapshot-restore/run.sh
 ```
 
 `REPO` names the repository (default `backups`); its `location` is relative to
-`BOOSTSEARCH_PATH_REPO`.
+`VELOSEARCH_PATH_REPO`.
 
 ## What to look for
 
@@ -86,4 +86,4 @@ so it can be copied somewhere else and still run.
 
 The repository `backups` with `nightly-2` in it, the indices `ledger`,
 `ledger-restored` and `other`, and the policy `nightly`. Rerunning deletes and
-recreates them. The repository's files are under `BOOSTSEARCH_PATH_REPO`.
+recreates them. The repository's files are under `VELOSEARCH_PATH_REPO`.

@@ -188,7 +188,7 @@ pub(crate) fn run_composite_agg(
         ));
     }
 
-    // A date source is bucketed here rather than by BoostCore: the column is
+    // A date source is bucketed here rather than by VeloCore: the column is
     // absent from any segment whose documents all lack the field, and a
     // histogram over a column that is only sometimes there answers for only
     // some of the segments. The span is known from the extremes, so the grid
@@ -306,7 +306,7 @@ pub(crate) fn run_composite_agg(
         let on_calendar = |ms: f64, advance: bool| -> f64 {
             let Some(unit) = calendar else { return ms };
             let local = (ms as i128) * 1_000_000 + zone_ns;
-            let Ok(dt) = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(local) else {
+            let Ok(dt) = velocore::time::OffsetDateTime::from_unix_timestamp_nanos(local) else {
                 return ms;
             };
             let moved = if advance { unit.advance(dt) } else { unit.floor(dt) };
@@ -394,7 +394,7 @@ pub(crate) fn run_composite_agg(
         }
     } else {
         // nest the sources outermost-first; the innermost carries the sub-aggs
-        // BoostCore can run, and the rest wait for the page to be settled
+        // VeloCore can run, and the rest wait for the page to be settled
         let (peeled, plain) = split_peelable(&sub_aggs, store, targets);
         held_back = peeled;
         let mut request = plain.unwrap_or_else(|| json!({}));

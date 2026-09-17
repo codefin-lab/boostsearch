@@ -1,13 +1,13 @@
 {
- "label": "boostsearch-vm-5",
+ "label": "velosearch-vm-5",
  "target": {
-  "distribution": "boostsearch",
+  "distribution": "velosearch",
   "number": "3.9.0",
   "build_type": "tar",
   "build_hash": "unknown",
   "build_date": "2026-01-01T00:00:00.000000Z",
   "build_snapshot": false,
-  "lucene_version": "BoostCore-0.26",
+  "lucene_version": "VeloCore-0.26",
   "minimum_wire_compatibility_version": "2.19.0",
   "minimum_index_compatibility_version": "2.0.0"
  },

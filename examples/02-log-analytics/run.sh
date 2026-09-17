@@ -17,7 +17,7 @@ req PUT "/logs-000001" '{ "aliases": { "logs": { "is_write_index": true } } }'
 quiet POST "/_plugins/_ism/add/logs-000001" '{ "policy_id": "logs-lifecycle" }'
 
 step "a morning of traffic, written through the alias"
-python3 - "$BS" <<'PY' > /tmp/logs.ndjson
+python3 - "$VS" <<'PY' > /tmp/logs.ndjson
 import json, random, sys, datetime
 random.seed(7)
 base = datetime.datetime(2026, 9, 12, 6, 0, 0)
@@ -65,13 +65,13 @@ step "the policy at work -- it may take a few ticks"
 i=0
 while [ $i -lt 24 ]; do
   sleep 2; i=$((i + 1))
-  n=$("${CURL[@]}" "$BS/_cat/indices/logs-*?h=index" 2>/dev/null | wc -l | tr -d ' ')
+  n=$("${CURL[@]}" "$VS/_cat/indices/logs-*?h=index" 2>/dev/null | wc -l | tr -d ' ')
   [ "$n" -gt 1 ] && break
 done
 req GET "/_plugins/_ism/explain/logs-000001"
 req GET "/_cat/indices/logs-*?v&h=index,docs.count,status"
 note "if only logs-000001 is listed, the node's ISM job interval is longer than this"
-note "example waits: start it with BOOSTSEARCH_ISM_INTERVAL_MS=2000 to watch the whole life"
+note "example waits: start it with VELOSEARCH_ISM_INTERVAL_MS=2000 to watch the whole life"
 
 step "the alias always points at the one index that takes writes"
 req GET "/_cat/aliases/logs?v"

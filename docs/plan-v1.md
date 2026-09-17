@@ -1,11 +1,11 @@
-# BoostSearch v1 — the work
+# VeloSearch v1 — the work
 
 What version one is, how it is measured, and what is left to build. Written
 2026-08-31, after the decisions in `docs/adr/`.
 
 ## What v1 means
 
-BoostSearch answers everything OpenSearch 3.x answers, and beats it on every
+VeloSearch answers everything OpenSearch 3.x answers, and beats it on every
 dimension of the bench matrix. Elasticsearch 8/9 is a separate target and is
 version two (ADR 0006, 0001–0005 for the rest).
 
@@ -62,12 +62,12 @@ about two thousand lines.
 
 ### 1. Analysis — 22 days
 
-An analyzer belongs to a path, and BoostCore learns to pick one per path
+An analyzer belongs to a path, and VeloCore learns to pick one per path
 (ADR 0001).
 
 | | | days |
 |---|---|---:|
-| 1.1 | BoostCore: a resolver from path to analyzer in the write path | 2 |
+| 1.1 | VeloCore: a resolver from path to analyzer in the write path | 2 |
 | 1.2 | The chain wired: registry per index, indexing, querying, `_analyze`, `search_analyzer`, `normalizer` | 4 |
 | 1.3 | The 18 built-in analysers and the ~25 filters the tests name, token for token | 5 |
 | 1.4 | Japanese, Korean, Chinese (lindera), ICU (icu4x), Thai segmentation | 8 |

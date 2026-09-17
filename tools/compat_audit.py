@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""What a running OpenSearch cluster asks for, and whether BoostSearch answers it.
+"""What a running OpenSearch cluster asks for, and whether VeloSearch answers it.
 
 Two modes, and a migration wants both.
 
   inventory  reads a cluster's indices, mappings, settings and templates, and
-             says which of them BoostSearch cannot honour -- including the ones
+             says which of them VeloSearch cannot honour -- including the ones
              it would accept and quietly get wrong.
 
   replay     sends the same captured requests to two servers and compares the
@@ -51,7 +51,7 @@ def probe(url):
     """Ask an engine what it actually answers, rather than trusting a list."""
     sess = requests.Session()
     base = url.rstrip("/")
-    idx = "boostsearch_compat_probe"
+    idx = "velosearch_compat_probe"
     sess.delete(f"{base}/{idx}", timeout=30)
 
     types = set()
@@ -297,7 +297,7 @@ def replay(requests_file, a_url, b_url, out, keep_scores, strict=False):
             "path": path,
             "body": body,
             "status": [code_a, code_b],
-            "diff": list(difflib.unified_diff(left, right, "opensearch", "boostsearch", n=1))[:40],
+            "diff": list(difflib.unified_diff(left, right, "opensearch", "velosearch", n=1))[:40],
         })
     pathlib.Path(out).write_text(json.dumps({"same": same, "differ": differ, "failed": failed, "rows": rows}, indent=1))
     return same, differ, failed, rows
@@ -482,7 +482,7 @@ def main():
     sub = ap.add_subparsers(dest="mode", required=True)
     inv = sub.add_parser("inventory")
     inv.add_argument("--cluster", required=True, help="the OpenSearch being replaced")
-    inv.add_argument("--engine", required=True, help="the BoostSearch replacing it")
+    inv.add_argument("--engine", required=True, help="the VeloSearch replacing it")
     inv.add_argument("--out", default="compat-inventory.json")
     rep = sub.add_parser("replay")
     rep.add_argument("--requests", required=True)

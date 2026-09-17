@@ -256,27 +256,27 @@ impl IdxState {
 /// read where they are, and a document that is there but no longer alive does
 /// not count as there.
 pub(crate) fn alive_address(
-    searcher: &boostcore::Searcher,
+    searcher: &velocore::Searcher,
     id_field: Field,
     id: &str,
-) -> Option<boostcore::DocAddress> {
-    use boostcore::DocSet;
+) -> Option<velocore::DocAddress> {
+    use velocore::DocSet;
     let term = Term::from_field_text(id_field, id);
     for (ord, seg) in searcher.segment_readers().iter().enumerate() {
         let Ok(inv) = seg.inverted_index(id_field) else { continue };
         let Ok(Some(mut postings)) =
-            inv.read_postings(&term, boostcore::schema::IndexRecordOption::Basic)
+            inv.read_postings(&term, velocore::schema::IndexRecordOption::Basic)
         else {
             continue;
         };
         let alive = seg.alive_bitset();
         loop {
             let doc = postings.doc();
-            if doc == boostcore::TERMINATED {
+            if doc == velocore::TERMINATED {
                 break;
             }
             if alive.map(|a| a.is_alive(doc)).unwrap_or(true) {
-                return Some(boostcore::DocAddress::new(ord as u32, doc));
+                return Some(velocore::DocAddress::new(ord as u32, doc));
             }
             postings.advance();
         }

@@ -9,9 +9,9 @@ different request. So this runs the corpus in the passes the suites imply and
 adds the numbers up, rather than letting either sit permanently red.
 
     tools/gate_node.sh &
-    BOOST_PORT=9214 BOOST_DATA=/tmp/boost-noingest \\
-      BOOST_URL_REPO=/tmp/boost-noingest-repo \\
-      BOOST_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh &
+    VELO_PORT=9214 VELO_DATA=/tmp/velo-noingest \\
+      VELO_URL_REPO=/tmp/velo-noingest-repo \\
+      VELO_ROLES=data,cluster_manager,remote_cluster_client tools/gate_node.sh &
     tools/module_gate.py
 """
 import json
@@ -22,8 +22,8 @@ import sys
 import tempfile
 
 MANIFEST = "tools/modules_manifest.json"
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
-NO_INGEST = os.environ.get("BOOST_NO_INGEST_URL", "http://127.0.0.1:9214")
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
+NO_INGEST = os.environ.get("VELO_NO_INGEST_URL", "http://127.0.0.1:9214")
 # the suite written against a cluster with no ingest node
 APART = "smoke-test-ingest-disabled"
 

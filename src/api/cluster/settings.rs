@@ -467,8 +467,8 @@ fn parse_time_ms(t: &str) -> Option<u64> {
     Some((n * mult) as u64)
 }
 
-/// `POST /_boost/chaos` -- a partition made real at this node, for the
-/// chaos and linearizability runs; mounted only under `BOOSTSEARCH_CHAOS=1`.
+/// `POST /_velo/chaos` -- a partition made real at this node, for the
+/// chaos and linearizability runs; mounted only under `VELOSEARCH_CHAOS=1`.
 /// `{"cut": ["n2", "n3"]}` cuts this node off from those (by name or id);
 /// `{"heal": true}` mends every cut.
 pub async fn chaos(State(_store): State<Store>, body: String) -> Response {

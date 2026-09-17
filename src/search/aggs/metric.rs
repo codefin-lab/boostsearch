@@ -24,7 +24,7 @@ pub(crate) fn hdr_percentiles_field(node: &Value) -> Option<String> {
 
 /// Every value of one numeric field across the documents a query matches.
 ///
-/// Aggregations that BoostCore does not provide are computed from these directly;
+/// Aggregations that VeloCore does not provide are computed from these directly;
 /// the field is read from the columnar, so nothing is materialised per document
 /// beyond the value itself.
 pub(crate) fn collect_field_values(
@@ -58,7 +58,7 @@ pub(crate) fn collect_field_values(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let column = ctx.column_name(field, false);
         let searcher = g.reader.searcher();
-        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+        let addrs = searcher.search(&q, &velocore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
         })?;
         let cols: Vec<SortColumns> = searcher
@@ -233,7 +233,7 @@ pub(crate) fn collect_field_pairs(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let (a_col, b_col) = (ctx.column_name(a_field, false), ctx.column_name(b_field, false));
         let searcher = g.reader.searcher();
-        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+        let addrs = searcher.search(&q, &velocore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
         })?;
         let cols: Vec<(SortColumns, SortColumns)> = searcher

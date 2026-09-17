@@ -33,7 +33,7 @@ cargo build --release    # in the repository root
 ```
 
 `make check` validates the script without starting anything. This example
-ignores `BS` and `make serve`: it is about a cluster, so it brings its own.
+ignores `VS` and `make serve`: it is about a cluster, so it brings its own.
 
 ```bash
 cargo build --release
@@ -42,7 +42,7 @@ examples/13-cluster-failover/run.sh
 
 Do **not** run it at the same time as `tools/cluster_chaos.py` -- both want
 ports and both are sensitive to CPU contention. `ROOT` sets where the data
-directories go (default `/tmp/boost-cluster-example`).
+directories go (default `/tmp/velo-cluster-example`).
 
 ## What to look for
 

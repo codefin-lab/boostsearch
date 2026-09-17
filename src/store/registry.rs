@@ -109,7 +109,7 @@ impl Store {
     /// quiet. With one index this is invisible; with hundreds it is the
     /// difference between 13 MB per index and nothing.
     fn start_writer_reaper(&self) {
-        let idle_secs: u64 = std::env::var("BOOSTSEARCH_WRITER_IDLE_SECS")
+        let idle_secs: u64 = std::env::var("VELOSEARCH_WRITER_IDLE_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
@@ -277,7 +277,7 @@ impl Store {
 
     /// How many indices may hold a writer at once.
     pub fn writer_limit() -> usize {
-        std::env::var("BOOSTSEARCH_MAX_LIVE_WRITERS")
+        std::env::var("VELOSEARCH_MAX_LIVE_WRITERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8)
@@ -857,7 +857,7 @@ impl Store {
         // before has no such setting and keeps the fold it was written with.
         if let Some(st) = self.get(name) {
             let mut g = st.write();
-            if g.numeric_setting("boost_routing_shards").is_none() {
+            if g.numeric_setting("velo_routing_shards").is_none() {
                 // `number_of_routing_shards` written at creation is the fold;
                 // without it, the one the reference derives from the count
                 let shards = g.shard_count().max(1);
@@ -871,7 +871,7 @@ impl Store {
                 if !g.settings.get("index").map(|v| v.is_object()).unwrap_or(false) {
                     g.settings["index"] = serde_json::json!({});
                 }
-                g.settings["index"]["boost_routing_shards"] = serde_json::json!(rns.to_string());
+                g.settings["index"]["velo_routing_shards"] = serde_json::json!(rns.to_string());
                 g.save_meta();
             }
         }
@@ -913,20 +913,20 @@ impl Store {
         index.set_executor(self.executor.clone());
         // one arena per indexing thread; a bigger budget means fewer segment
         // flushes and less merging, at the cost of resident memory
-        let writer_budget: usize = std::env::var("BOOSTSEARCH_WRITER_BUDGET_MB")
+        let writer_budget: usize = std::env::var("VELOSEARCH_WRITER_BUDGET_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64)
             * 1024
             * 1024;
-        let writer_threads: usize = std::env::var("BOOSTSEARCH_WRITER_THREADS")
+        let writer_threads: usize = std::env::var("VELOSEARCH_WRITER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
         let reader =
-            index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
+            index.reader_builder().reload_policy(velocore::ReloadPolicy::Manual).try_into()?;
         let realtime =
-            index.reader_builder().reload_policy(boostcore::ReloadPolicy::Manual).try_into()?;
+            index.reader_builder().reload_policy(velocore::ReloadPolicy::Manual).try_into()?;
         let mapping = body
             .get("mappings")
             .map(Mapping::from_body)
@@ -1209,7 +1209,7 @@ impl Store {
 ///
 /// An index already on disk keeps what it was written with: the setting
 /// travels in its own metadata, so this reaches new segments only.
-fn codec_settings(body: &Value) -> boostcore::IndexSettings {
+fn codec_settings(body: &Value) -> velocore::IndexSettings {
     let codec = body
         .pointer("/settings/index/codec")
         .or_else(|| body.pointer("/settings/index.codec"))
@@ -1219,10 +1219,10 @@ fn codec_settings(body: &Value) -> boostcore::IndexSettings {
         "best_compression" | "zstd_no_dict" | "zstd" => (12, 262_144),
         _ => (9, 65_536),
     };
-    boostcore::IndexSettings {
-        docstore_compression: boostcore::store::Compressor::Zstd(
-            boostcore::store::ZstdCompressor { compression_level: Some(level) },
-        ),
+    velocore::IndexSettings {
+        docstore_compression: velocore::store::Compressor::Zstd(velocore::store::ZstdCompressor {
+            compression_level: Some(level),
+        }),
         docstore_blocksize: block,
         ..Default::default()
     }

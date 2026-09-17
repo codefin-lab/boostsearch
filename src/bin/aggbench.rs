@@ -2,17 +2,17 @@
 //!
 //! Splits one aggregation request into the stages our code actually performs,
 //! so the expensive one can be found rather than guessed at.
-use boostcore::aggregation::agg_req::Aggregations;
-use boostcore::aggregation::{
-    AggContextParams, AggregationCollector, DistributedAggregationCollector,
-};
-use boostcore::query::AllQuery;
-use boostsearch::store::Store;
 use serde_json::json;
 use std::time::Instant;
+use velocore::aggregation::agg_req::Aggregations;
+use velocore::aggregation::{
+    AggContextParams, AggregationCollector, DistributedAggregationCollector,
+};
+use velocore::query::AllQuery;
+use velosearch::store::Store;
 
 fn main() -> anyhow::Result<()> {
-    let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/blk".into());
+    let data = std::env::var("VELOSEARCH_DATA").unwrap_or("/tmp/blk".into());
     let n: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
     let store = Store::on_disk(&data)?;
     let st = store.get("bench_logs").expect("bench_logs");
@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         println!("\n  {name}");
         let parsed: Aggregations = serde_json::from_value(req.clone())?;
 
-        // 1. turning the request JSON into BoostCore's aggregation model
+        // 1. turning the request JSON into VeloCore's aggregation model
         let mut b = || {
             let _: Aggregations = serde_json::from_value(req.clone()).unwrap();
         };

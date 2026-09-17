@@ -22,7 +22,7 @@ rather than `"-"`), and `%{DATA:...}` being greedy across a quote.
 
 The databases are not where the node is looking. See `docs/geoip.md` in the
 repository for where they go, and start the node with
-`BOOSTSEARCH_GEOIP_PATH` pointing at them -- `make serve` sets it to
+`VELOSEARCH_GEOIP_PATH` pointing at them -- `make serve` sets it to
 `/tmp/geoip-db`.
 
 The `on_failure` on that processor means the rest of the example still works

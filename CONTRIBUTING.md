@@ -1,4 +1,4 @@
-# Working on BoostSearch
+# Working on VeloSearch
 
 ## Where things are
 
@@ -37,9 +37,9 @@ src/
         terms  ranges  filters
       composite  histogram  metric  pipeline  format
 
-  query/           the query DSL as BoostCore queries
+  query/           the query DSL as VeloCore queries
     mod            Ctx, and what a field name resolves to
-    dispatch       one query name to one BoostCore query
+    dispatch       one query name to one VeloCore query
     text  range  terms  bool  pattern  analyze
 
   store/           what an index is, and what it holds
@@ -81,7 +81,7 @@ cargo fmt --check              # no diff
 and the corpus, which is the point of the whole thing:
 
 ```bash
-BOOSTSEARCH_NODE_ATTRS=testattr=test ./target/release/boostsearch &
+VELOSEARCH_NODE_ATTRS=testattr=test ./target/release/velosearch &
 python3 tools/yaml_runner.py --manifest tools/phase1_manifest.json    # 398/398
 python3 tools/yaml_runner.py --manifest tools/phase3_manifest.json    # 1,100/1,100
 python3 tools/module_gate.py                                          # 880/890

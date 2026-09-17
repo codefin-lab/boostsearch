@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every dimension, both engines, same corpus, same machine.
 
-The claim is that BoostSearch beats OpenSearch everywhere, which is only worth
+The claim is that VeloSearch beats OpenSearch everywhere, which is only worth
 saying if it is checked everywhere and checked again after every change. This
 writes the table that says so, and exits non-zero if any dimension is lost.
 
@@ -11,9 +11,9 @@ well as its middle and printed beside it; the gate is on the middle, because a
 p99 over a hundred and fifty requests moves more than a change usually does.
 
     BENCH_A             the engine to compare against  (default: OpenSearch)
-    BENCH_B             the engine under test          (default: BoostSearch)
+    BENCH_B             the engine under test          (default: VeloSearch)
     BENCH_AUTH          user:pass, when either has security on
-    BENCH_B_CONTAINER   the container BoostSearch runs in, when it does
+    BENCH_B_CONTAINER   the container VeloSearch runs in, when it does
     BENCH_A_CONTAINER   the docker container A runs in, for its memory
     BENCH_DATA          the corpus  (default: /tmp/bench_logs.ndjson)
     BENCH_OUT           where the numbers are written  (default: /tmp/matrix.json)
@@ -337,7 +337,7 @@ def human_bytes(n):
 
 
 A = ("OpenSearch", os.environ.get("BENCH_A", "http://127.0.0.1:9201"))
-B = ("BoostSearch", os.environ.get("BENCH_B", "http://127.0.0.1:9200"))
+B = ("VeloSearch", os.environ.get("BENCH_B", "http://127.0.0.1:9200"))
 
 res = {}
 for label, base in (A, B):
@@ -361,18 +361,18 @@ for label, base in (A, B):
 
 res["OpenSearch"]["rss_mib"] = rss_mib(
     container=os.environ.get("BENCH_A_CONTAINER", "os-bench"))
-# BoostSearch in a container is measured the way OpenSearch is; as a process
+# VeloSearch in a container is measured the way OpenSearch is; as a process
 # on this machine, by its pid
 if os.environ.get("BENCH_B_CONTAINER"):
-    res["BoostSearch"]["rss_mib"] = rss_mib(container=os.environ["BENCH_B_CONTAINER"])
+    res["VeloSearch"]["rss_mib"] = rss_mib(container=os.environ["BENCH_B_CONTAINER"])
 else:
-    pids = subprocess.run(["pgrep", "-f", "release/boostsearch"],
+    pids = subprocess.run(["pgrep", "-f", "release/velosearch"],
                           capture_output=True, text=True).stdout.split()
-    res["BoostSearch"]["rss_mib"] = rss_mib(pid=pids[0] if pids else None)
+    res["VeloSearch"]["rss_mib"] = rss_mib(pid=pids[0] if pids else None)
 
 json.dump(res, open(OUT, "w"), indent=1)
 
-o, b = res["OpenSearch"], res["BoostSearch"]
+o, b = res["OpenSearch"], res["VeloSearch"]
 lost = []
 
 
@@ -385,13 +385,13 @@ def row(name, ov, bv, higher_wins, fmt=lambda v: f"{v:,.0f}", note=""):
         print(f"{name:<24}{'?':>14}{'?':>14}   not measured")
         return
     won = bv > ov if higher_wins else bv < ov
-    winner = "BoostSearch" if won else "OpenSearch"
+    winner = "VeloSearch" if won else "OpenSearch"
     if not won:
         lost.append(name)
     print(f"{name:<24}{fmt(ov):>14}{fmt(bv):>14}   {winner}{note}")
 
 
-print(f"\n{'dimension':<24}{'OpenSearch':>14}{'BoostSearch':>14}   winner")
+print(f"\n{'dimension':<24}{'OpenSearch':>14}{'VeloSearch':>14}   winner")
 if o["docs"] != b["docs"]:
     sys.exit(f"the engines hold different corpora: {o['docs']} against {b['docs']} documents")
 row("index docs/s", o["index_docs_per_s"], b["index_docs_per_s"], True)

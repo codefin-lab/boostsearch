@@ -22,13 +22,13 @@ pub struct TlsSettings {
     pub client_auth: String,
 }
 
-/// The config directory: `BOOSTSEARCH_CONFIG`, else `<data>/config`, else
+/// The config directory: `VELOSEARCH_CONFIG`, else `<data>/config`, else
 /// `./config`.
 pub fn config_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("BOOSTSEARCH_CONFIG") {
+    if let Ok(d) = std::env::var("VELOSEARCH_CONFIG") {
         return PathBuf::from(d);
     }
-    if let Ok(d) = std::env::var("BOOSTSEARCH_DATA")
+    if let Ok(d) = std::env::var("VELOSEARCH_DATA")
         && !d.is_empty()
     {
         return PathBuf::from(d).join("config");
@@ -36,10 +36,10 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from("config")
 }
 
-/// The node's own settings file, `config/boostsearch.yml`, read as JSON-like
+/// The node's own settings file, `config/velosearch.yml`, read as JSON-like
 /// YAML; an absent file is an empty one.
 pub fn node_settings() -> Value {
-    let path = config_dir().join("boostsearch.yml");
+    let path = config_dir().join("velosearch.yml");
     let Ok(text) = std::fs::read_to_string(&path) else { return Value::Object(Default::default()) };
     serde_yaml::from_str::<serde_yaml::Value>(&text)
         .ok()
@@ -47,18 +47,18 @@ pub fn node_settings() -> Value {
         .unwrap_or(Value::Object(Default::default()))
 }
 
-/// One dotted setting, from the environment first (`BOOSTSEARCH_` + the
+/// One dotted setting, from the environment first (`VELOSEARCH_` + the
 /// dotted name upper-cased with `_`), then the settings file.
 pub fn node_setting(settings: &Value, key: &str) -> Option<String> {
     let env_name = format!(
-        "BOOSTSEARCH_{}",
+        "VELOSEARCH_{}",
         key.trim_start_matches("plugins.security.").replace('.', "_").to_ascii_uppercase()
     );
     if let Ok(v) = std::env::var(&env_name) {
         return Some(v);
     }
     // the full dotted name spelled out is read as well
-    let full = format!("BOOSTSEARCH_{}", key.replace('.', "_").to_ascii_uppercase());
+    let full = format!("VELOSEARCH_{}", key.replace('.', "_").to_ascii_uppercase());
     if let Ok(v) = std::env::var(&full) {
         return Some(v);
     }
@@ -125,7 +125,7 @@ pub fn load_or_make(
             );
         }
         make_self_signed(&cert_path, &key_path)?;
-        eprintln!("boostsearch: made a self-signed certificate at {}", cert_path.display());
+        eprintln!("velosearch: made a self-signed certificate at {}", cert_path.display());
     }
     let certs =
         rustls_pemfile::certs(&mut std::io::BufReader::new(std::fs::File::open(&cert_path)?))
@@ -142,8 +142,8 @@ fn make_self_signed(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
     }
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
     params.distinguished_name = rcgen::DistinguishedName::new();
-    params.distinguished_name.push(rcgen::DnType::CommonName, "boostsearch node");
-    params.distinguished_name.push(rcgen::DnType::OrganizationName, "BoostSearch");
+    params.distinguished_name.push(rcgen::DnType::CommonName, "velosearch node");
+    params.distinguished_name.push(rcgen::DnType::OrganizationName, "VeloSearch");
     params
         .subject_alt_names
         .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
@@ -226,7 +226,7 @@ pub async fn serve_tls(
                 .await;
                 if waited.is_err() {
                     eprintln!(
-                        "boostsearch: stopping with requests still in flight after {}s",
+                        "velosearch: stopping with requests still in flight after {}s",
                         grace.as_secs()
                     );
                 }

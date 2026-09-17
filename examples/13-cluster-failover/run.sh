@@ -5,8 +5,8 @@
 # server, and it must not be run at the same time as the chaos gate.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-BIN=${BIN:-./target/release/boostsearch}
-ROOT=${ROOT:-/tmp/boost-cluster-example}
+BIN=${BIN:-./target/release/velosearch}
+ROOT=${ROOT:-/tmp/velo-cluster-example}
 PORTS=(9340 9341 9342)
 TPORTS=(9440 9441 9442)
 NAMES=(n1 n2 n3)
@@ -167,12 +167,12 @@ rm -rf "$ROOT"; mkdir -p "$ROOT/logs"
 
 start_node() {
   local i=$1
-  BOOSTSEARCH_ADDR=127.0.0.1:${PORTS[$i]} \
-  BOOSTSEARCH_TRANSPORT_PORT=${TPORTS[$i]} \
-  BOOSTSEARCH_DATA="$ROOT/${NAMES[$i]}" \
-  BOOSTSEARCH_NODE_NAME=${NAMES[$i]} \
-  BOOSTSEARCH_DISCOVERY_SEED_HOSTS="$SEEDS" \
-  BOOSTSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES="n1,n2,n3" \
+  VELOSEARCH_ADDR=127.0.0.1:${PORTS[$i]} \
+  VELOSEARCH_TRANSPORT_PORT=${TPORTS[$i]} \
+  VELOSEARCH_DATA="$ROOT/${NAMES[$i]}" \
+  VELOSEARCH_NODE_NAME=${NAMES[$i]} \
+  VELOSEARCH_DISCOVERY_SEED_HOSTS="$SEEDS" \
+  VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES="n1,n2,n3" \
   "$BIN" > "$ROOT/logs/${NAMES[$i]}.log" 2>&1 &
 }
 

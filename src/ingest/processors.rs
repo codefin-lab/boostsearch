@@ -1944,8 +1944,8 @@ fn format_in_zone(ms: i64, pattern: &str, zone_ms: i64) -> Option<String> {
     if named {
         return crate::store::format_millis_at(ms, pattern, zone_ms);
     }
-    let offset = boostcore::time::UtcOffset::from_whole_seconds((zone_ms / 1000) as i32).ok()?;
-    let local = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
+    let offset = velocore::time::UtcOffset::from_whole_seconds((zone_ms / 1000) as i32).ok()?;
+    let local = velocore::time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
         .ok()?
         .to_offset(offset);
     Some(crate::store::format_with_pattern(local, pattern))

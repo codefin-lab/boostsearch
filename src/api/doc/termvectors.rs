@@ -1,10 +1,10 @@
 //! What a document's text became, term by term.
 
 use super::*;
-use boostcore::DocSet;
-use boostcore::postings::Postings;
-use boostcore::query::Bm25StatisticsProvider;
-use boostcore::schema::IndexRecordOption;
+use velocore::DocSet;
+use velocore::postings::Postings;
+use velocore::query::Bm25StatisticsProvider;
+use velocore::schema::IndexRecordOption;
 
 /// `_termvectors` -- what a document's text became once analysed.
 ///
@@ -82,7 +82,7 @@ fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64, u64) {
     // nothing -- `sum_doc_freq` came back zero for a keyword every document
     // had, where the reference reports one for each of them.
     let (held, path) = held_path(g, field);
-    let mut start = boostcore::Term::from_field_json_path(held, &path, true);
+    let mut start = velocore::Term::from_field_json_path(held, &path, true);
     start.append_type_and_str("");
     let prefix = start.serialized_value_bytes().to_vec();
     let mut sum_doc_freq = 0u64;
@@ -99,7 +99,7 @@ fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64, u64) {
                 if let Ok(mut postings) =
                     inverted.read_postings_from_terminfo(info, IndexRecordOption::WithFreqs)
                 {
-                    while postings.doc() != boostcore::TERMINATED {
+                    while postings.doc() != velocore::TERMINATED {
                         sum_ttf += postings.term_freq() as u64;
                         postings.advance();
                     }
@@ -112,7 +112,7 @@ fn field_statistics_of(g: &IdxState, field: &str) -> (u64, u64, u64) {
 }
 
 /// The field of the index a field's terms are kept in, and the path under it.
-fn held_path(g: &IdxState, field: &str) -> (boostcore::schema::Field, String) {
+fn held_path(g: &IdxState, field: &str) -> (velocore::schema::Field, String) {
     let ctx = crate::query::Ctx {
         fields: &g.fields,
         mapping: &g.mapping,
@@ -250,7 +250,7 @@ pub(crate) fn term_vectors_of(
                 // stands in all of them -- `ttf` was this document's own
                 // count, so a term twice here and fifteen times in the index
                 // reported two
-                let mut exact = boostcore::Term::from_field_json_path(held, &path, true);
+                let mut exact = velocore::Term::from_field_json_path(held, &path, true);
                 exact.append_type_and_str(term);
                 let mut doc_freq = 0u64;
                 let mut ttf = 0u64;
@@ -261,7 +261,7 @@ pub(crate) fn term_vectors_of(
                     else {
                         continue;
                     };
-                    while postings.doc() != boostcore::TERMINATED {
+                    while postings.doc() != velocore::TERMINATED {
                         doc_freq += 1;
                         ttf += postings.term_freq() as u64;
                         postings.advance();

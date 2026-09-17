@@ -1,11 +1,11 @@
 //! What would a custom columnar layout actually buy?
 //!
 //! Pulls the real column values out of the index, then runs the same value-range
-//! scan four ways: BoostCore's current path, a plain scalar scan, a scan with
+//! scan four ways: VeloCore's current path, a plain scalar scan, a scan with
 //! per-block min/max skipping, and a chunked scan the compiler can vectorise.
 //! The point is to size the opportunity before building anything.
-use boostsearch::store::Store;
 use std::time::Instant;
+use velosearch::store::Store;
 
 const BLOCK: usize = 512;
 
@@ -98,7 +98,7 @@ fn time_it(name: &str, n: usize, mut f: impl FnMut() -> usize) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let data = std::env::var("BOOSTSEARCH_DATA").unwrap_or("/tmp/kinds-data".into());
+    let data = std::env::var("VELOSEARCH_DATA").unwrap_or("/tmp/kinds-data".into());
     let store = Store::on_disk(&data)?;
     let st = store.get("bench_logs").expect("index bench_logs");
     let g = st.read();
@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
             out.len()
         });
 
-        // Feasibility check: keep BoostCore's columnar format, but drive its
+        // Feasibility check: keep VeloCore's columnar format, but drive its
         // existing docid-range API one surviving block at a time using a
         // sidecar of per-block min/max. No fork required.
         for seg in searcher.segment_readers() {
@@ -197,12 +197,12 @@ fn main() -> anyhow::Result<()> {
             break;
         }
 
-        // what BoostCore does today, through the real column
+        // what VeloCore does today, through the real column
         let mut docids: Vec<u32> = Vec::new();
         for seg in searcher.segment_readers() {
             let Ok(Some((col, _))) = seg.fast_fields().u64_lenient(column) else { continue };
             let max_doc = seg.max_doc();
-            time_it("BoostCore get_docids_for_value_range", n, || {
+            time_it("VeloCore get_docids_for_value_range", n, || {
                 docids.clear();
                 col.get_docids_for_value_range(lo..=hi, 0..max_doc, &mut docids);
                 docids.len()

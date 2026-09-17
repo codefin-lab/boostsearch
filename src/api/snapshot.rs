@@ -151,7 +151,7 @@ pub async fn verify_repository(
             format!("[{name}] missing"),
         );
     }
-    respond(&p, json!({"nodes": {"node-0": {"name": "boostsearch"}}}))
+    respond(&p, json!({"nodes": {"node-0": {"name": "velosearch"}}}))
 }
 
 /// `POST /_snapshot/{repo}/_cleanup` -- nothing is left behind here, so there
@@ -265,7 +265,7 @@ pub(crate) fn allowed_urls(store: &Store) -> Vec<String> {
             return named;
         }
     }
-    std::env::var("BOOSTSEARCH_URL_ALLOWED")
+    std::env::var("VELOSEARCH_URL_ALLOWED")
         .ok()
         .map(|v| listed(Value::String(v)))
         .unwrap_or_default()

@@ -34,7 +34,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tools" / "bench_baseline.json"
-RECORDED_US = "bench/results/final-obs-clean-*.json"
+RECORDED_US = "bench/results/final-velosearch-clean-*.json"
 RECORDED_THEM = "bench/results/final-os-clean-*.json"
 
 # How far a dimension may fall before the gate is red. ADR 0004's number.
@@ -125,10 +125,10 @@ def median_of(pattern):
 
 def measure(binary, port, transport, rounds, data):
     """Start a node, run the bench against it, and read the numbers back."""
-    where = tempfile.mkdtemp(prefix="boost-bench-")
+    where = tempfile.mkdtemp(prefix="velo-bench-")
     env = dict(os.environ)
-    env.update({"BOOSTSEARCH_ADDR": f"127.0.0.1:{port}", "BOOSTSEARCH_DATA": where,
-                "BOOSTSEARCH_TRANSPORT_PORT": str(transport)})
+    env.update({"VELOSEARCH_ADDR": f"127.0.0.1:{port}", "VELOSEARCH_DATA": where,
+                "VELOSEARCH_TRANSPORT_PORT": str(transport)})
     log = open(pathlib.Path(where) / "node.log", "w")
     node = subprocess.Popen([binary], env=env, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
@@ -146,7 +146,7 @@ def measure(binary, port, transport, rounds, data):
             [sys.executable, str(ROOT / "tools" / "bench.py"), "--url", url,
              "--rounds", str(rounds), "--data", data, "--out", out,
              # this node's own memory, not the largest of whatever else on
-             # this machine happens to be called boostsearch
+             # this machine happens to be called velosearch
              "--proc", f"pid:{node.pid}"],
             capture_output=True, text=True, check=False, cwd=ROOT,
         )
@@ -183,7 +183,7 @@ def compare(now, before, spreads, slip):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "velosearch"))
     ap.add_argument("--port", type=int, default=9231)
     ap.add_argument("--transport", type=int, default=9331)
     ap.add_argument("--rounds", type=int, default=3)

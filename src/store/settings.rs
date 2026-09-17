@@ -166,7 +166,7 @@ impl IdxState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i128)
             .unwrap_or(0);
-        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+        velocore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
             .map(|d| {
                 format!(
                     "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -191,7 +191,7 @@ impl IdxState {
     /// The creation date as text, which is the other spelling `_cat` offers.
     pub fn created_string(&self) -> String {
         let ms = self.created_millis() as i128;
-        boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
+        velocore::time::OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000)
             .map(|d| {
                 format!(
                     "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",

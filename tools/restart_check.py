@@ -59,9 +59,9 @@ def start(binary, data, url, port, transport):
     env = dict(os.environ)
     env.update(
         {
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{port}",
-            "BOOSTSEARCH_DATA": data,
-            "BOOSTSEARCH_TRANSPORT_PORT": str(transport),
+            "VELOSEARCH_ADDR": f"127.0.0.1:{port}",
+            "VELOSEARCH_DATA": data,
+            "VELOSEARCH_TRANSPORT_PORT": str(transport),
         }
     )
     log = open(pathlib.Path(data) / "node.log", "a")
@@ -91,14 +91,14 @@ def load(url, index, count):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "velosearch"))
     ap.add_argument("--port", type=int, default=9264)
     ap.add_argument("--transport", type=int, default=9364)
     ap.add_argument("--documents", type=int, default=2000)
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
 
-    data = str(pathlib.Path(f"/tmp/boost-restart-{os.getpid()}"))
+    data = str(pathlib.Path(f"/tmp/velo-restart-{os.getpid()}"))
     shutil.rmtree(data, ignore_errors=True)
     pathlib.Path(data).mkdir(parents=True)
     url = f"http://127.0.0.1:{args.port}"

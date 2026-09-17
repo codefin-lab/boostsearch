@@ -69,7 +69,7 @@ in each of those does it, so `make serve` is all you need; `.env.example` says
 what each setting is for and what happens without it.
 
 Example 13 is the odd one: it starts and stops its own three nodes and ignores
-`BS` entirely. Do not run it at the same time as `tools/cluster_chaos.py`.
+`VS` entirely. Do not run it at the same time as `tools/cluster_chaos.py`.
 
 ## Running all of them
 

@@ -57,11 +57,11 @@ Security is off by default, so this example needs a node started with it on,
 and with the audit log written to an index on the node itself:
 
 ```bash
-BOOSTSEARCH_DISABLED=false \
-BOOSTSEARCH_RESTAPI_ROLES_ENABLED=all_access \
-BOOSTSEARCH_AUDIT_TYPE=internal_opensearch \
-BOOSTSEARCH_DATA=/tmp/boost-audit \
-./target/release/boostsearch &
+VELOSEARCH_DISABLED=false \
+VELOSEARCH_RESTAPI_ROLES_ENABLED=all_access \
+VELOSEARCH_AUDIT_TYPE=internal_opensearch \
+VELOSEARCH_DATA=/tmp/velo-audit \
+./target/release/velosearch &
 
 examples/21-service-accounts-and-audit/run.sh
 ```

@@ -14,7 +14,7 @@ pub(crate) fn normalized(ctx: &Ctx, field: &str, text: &str) -> String {
     }
 }
 
-/// Map OpenSearch analyzer names onto the tokenizers BoostCore ships.
+/// Map OpenSearch analyzer names onto the tokenizers VeloCore ships.
 pub(crate) fn tokenizer_name(analyzer: Option<&str>) -> &str {
     match analyzer.unwrap_or("standard") {
         "whitespace" => "whitespace",

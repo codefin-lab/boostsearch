@@ -445,7 +445,7 @@ pub(crate) fn build_highlight(
     source: &Value,
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
-    index: &boostcore::Index,
+    index: &velocore::Index,
     analysis: &crate::analysis::Registry,
 ) -> Option<Value> {
     spec.get("fields")?;

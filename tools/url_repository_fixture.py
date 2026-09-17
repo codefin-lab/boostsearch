@@ -14,7 +14,7 @@ nothing.
 Where a node may read a repository from is the node's own setting, not a
 cluster one, so it cannot be arranged from here: start the node with
 
-    BOOSTSEARCH_PATH_REPO=/tmp/boost-url-repo BOOSTSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:9280*"
+    VELOSEARCH_PATH_REPO=/tmp/velo-url-repo VELOSEARCH_URL_ALLOWED="http://snapshot.test*,http://127.0.0.1:9280*"
 
 which is the same arrangement OpenSearch's build gives its own node: a
 `file://` repository is allowed by sitting under the repository root, and
@@ -34,9 +34,9 @@ import sys
 import urllib.error
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
-SHARED = pathlib.Path(os.environ.get("BOOST_URL_REPO", "/tmp/boost-url-repo"))
-PORT = int(os.environ.get("BOOST_URL_FIXTURE_PORT", "9280"))
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
+SHARED = pathlib.Path(os.environ.get("VELO_URL_REPO", "/tmp/velo-url-repo"))
+PORT = int(os.environ.get("VELO_URL_FIXTURE_PORT", "9280"))
 
 
 def serving():

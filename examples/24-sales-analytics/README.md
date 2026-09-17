@@ -53,8 +53,8 @@ and confirms the committed data is byte for byte what the generator writes;
 The longer form. The example needs nothing special of the node:
 
 ```bash
-BOOSTSEARCH_ADDR=127.0.0.1:9284 ./target/release/boostsearch &
-BS=http://127.0.0.1:9284 examples/24-sales-analytics/run.sh
+VELOSEARCH_ADDR=127.0.0.1:9284 ./target/release/velosearch &
+VS=http://127.0.0.1:9284 examples/24-sales-analytics/run.sh
 ```
 
 ## What to look for

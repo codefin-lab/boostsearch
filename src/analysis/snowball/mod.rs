@@ -1,4 +1,4 @@
-//! The Snowball stemmers BoostCore does not carry.
+//! The Snowball stemmers VeloCore does not carry.
 //!
 //! Six languages -- Catalan, Basque, Irish, Lithuanian, Estonian and Armenian
 //! -- and the original Porter algorithm are generated from the Snowball

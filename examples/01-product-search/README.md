@@ -39,11 +39,11 @@ make run        # the example, in another terminal
 The longer form, and what this example needs of the node:
 
 ```bash
-./target/release/boostsearch &
+./target/release/velosearch &
 examples/01-product-search/run.sh
 ```
 
-`BS` sets the address if the server is not on `http://127.0.0.1:9200`.
+`VS` sets the address if the server is not on `http://127.0.0.1:9200`.
 
 ## What to look for
 

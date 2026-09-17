@@ -1,12 +1,12 @@
-# Replacing OpenSearch, and moving between BoostSearch versions
+# Replacing OpenSearch, and moving between VeloSearch versions
 
-Two different things are called an upgrade here. One is putting BoostSearch
-where an OpenSearch cluster is now. The other is moving a BoostSearch cluster
+Two different things are called an upgrade here. One is putting VeloSearch
+where an OpenSearch cluster is now. The other is moving a VeloSearch cluster
 from one version of itself to the next. This is both, in that order.
 
 ## Part one: replacing an OpenSearch you already run
 
-The claim is that BoostSearch answers what OpenSearch answers. The claim is
+The claim is that VeloSearch answers what OpenSearch answers. The claim is
 worth exactly as much as the check, so the check comes first and the cutover
 comes after it.
 
@@ -15,11 +15,11 @@ comes after it.
 ```bash
 python3 tools/compat_audit.py inventory \
     --cluster https://opensearch.example:9200 \
-    --engine  http://boostsearch.example:9200
+    --engine  http://velosearch.example:9200
 ```
 
 This reads the mappings, settings and analysis of every index in the cluster
-and reports anything BoostSearch does not answer for: a field type, an
+and reports anything VeloSearch does not answer for: a field type, an
 analyzer, a tokenizer, a filter. It writes `compat-inventory.json`, which is
 the list to work through. It changes nothing on either side.
 
@@ -34,7 +34,7 @@ python3 tools/compat_audit.py corpus
 python3 tools/compat_audit.py replay \
     --requests compat-corpus.ndjson \
     --a https://opensearch.example:9200 \
-    --b http://boostsearch.example:9200 \
+    --b http://velosearch.example:9200 \
     --scores
 ```
 
@@ -56,7 +56,7 @@ both formats with nothing checking it. Move the documents instead, by one of:
 - **Reindex from the old cluster**, which is one request per index:
 
   ```bash
-  curl -XPOST $BOOSTSEARCH/_reindex -H 'content-type: application/json' -d '{
+  curl -XPOST $VELOSEARCH/_reindex -H 'content-type: application/json' -d '{
     "source": {"remote": {"host": "https://opensearch.example:9200",
                           "username": "…", "password": "…"},
                "index": "logs-2026.01"},
@@ -69,7 +69,7 @@ both formats with nothing checking it. Move the documents instead, by one of:
   not have to guess.
 
 - **Snapshot and restore**, where both clusters can reach one repository. A
-  BoostSearch snapshot holds each index's mapping, settings and documents as
+  VeloSearch snapshot holds each index's mapping, settings and documents as
   they were written rather than somebody else's segment files, which is what
   makes it indifferent to which engine wrote it.
 
@@ -80,7 +80,7 @@ both formats with nothing checking it. Move the documents instead, by one of:
 
 Run both, send reads to both and compare, then send writes to both, then stop
 writing to the old one, then stop reading from it. Keep it until you are sure.
-Nothing about this is specific to BoostSearch; it is what you would do for any
+Nothing about this is specific to VeloSearch; it is what you would do for any
 engine replacement, and it is the part that makes step 2's diff mean
 something.
 
@@ -94,7 +94,7 @@ something.
 - **Segment-level things.** Force-merge state, segment counts, and anything
   that reads `_segments` will differ, because the segments are different.
 
-## Part two: moving between BoostSearch versions
+## Part two: moving between VeloSearch versions
 
 ### What is guaranteed
 
@@ -124,7 +124,7 @@ writers and readers running throughout, and says whether the mixed-version
 cluster kept answering and kept every acknowledged write:
 
 ```bash
-tools/rolling_upgrade.py --from ./target/release/boostsearch --to ./build/new/boostsearch
+tools/rolling_upgrade.py --from ./target/release/velosearch --to ./build/new/velosearch
 ```
 
 Given the same binary twice it is a rolling restart, which is the same test

@@ -49,19 +49,19 @@ def call(url, method, path, who, body=None):
         return 0, {"no answer": str(e)[:120]}
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "boostsearch"))
+ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "velosearch"))
 ap.add_argument("--port", type=int, default=9276)
 ap.add_argument("--transport", type=int, default=9376)
 args = ap.parse_args()
 PORT, TPORT = args.port, args.transport
 
-data = tempfile.mkdtemp(prefix="boost-dls-")
+data = tempfile.mkdtemp(prefix="velo-dls-")
 config = pathlib.Path(data) / "config"
 (config / "security").mkdir(parents=True, exist_ok=True)
 env = dict(os.environ)
-env.update({"BOOSTSEARCH_ADDR": f"127.0.0.1:{PORT}", "BOOSTSEARCH_DATA": data,
-            "BOOSTSEARCH_CONFIG": str(config), "BOOSTSEARCH_TRANSPORT_PORT": str(TPORT),
-            "BOOSTSEARCH_DISABLED": "false", "BOOSTSEARCH_RESTAPI_ROLES_ENABLED": "all_access"})
+env.update({"VELOSEARCH_ADDR": f"127.0.0.1:{PORT}", "VELOSEARCH_DATA": data,
+            "VELOSEARCH_CONFIG": str(config), "VELOSEARCH_TRANSPORT_PORT": str(TPORT),
+            "VELOSEARCH_DISABLED": "false", "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access"})
 log = open(pathlib.Path(data) / "node.log", "w")
 node = subprocess.Popen([args.binary], env=env, stdout=log, stderr=subprocess.STDOUT)
 url = f"http://127.0.0.1:{PORT}"

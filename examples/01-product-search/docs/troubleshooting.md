@@ -11,7 +11,7 @@ make serve          # in another terminal; foreground, control-C to stop
 Or point the example at a server you already have:
 
 ```bash
-BS=http://127.0.0.1:9200 ./run.sh
+VS=http://127.0.0.1:9200 ./run.sh
 ```
 
 ## Step 3 returns nothing for "laptop"

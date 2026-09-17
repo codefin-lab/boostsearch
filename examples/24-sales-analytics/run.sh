@@ -11,7 +11,7 @@ PAGES=/tmp/sales-24-buckets.ndjson
 # ask METHOD PATH FILE -- reqf, keeping the answer in $ANSWER for the checks
 ANSWER=
 ask() {
-  ANSWER=$("${CURL[@]}" -X "$1" "$BS$2" -H 'Content-Type: application/json' --data-binary "@$3")
+  ANSWER=$("${CURL[@]}" -X "$1" "$VS$2" -H 'Content-Type: application/json' --data-binary "@$3")
   printf '%s\n' "$ANSWER"
 }
 
@@ -47,7 +47,7 @@ b = json.load(open(sys.argv[1]))
 job = b.get("transform") or b.get("rollup")
 job["schedule"]["interval"]["start_time"] = int(time.time() * 1000) - 58000
 print(json.dumps(b))' "$3")
-  ANSWER=$("${CURL[@]}" -X PUT "$BS$path" -H 'Content-Type: application/json' -d "$body")
+  ANSWER=$("${CURL[@]}" -X PUT "$VS$path" -H 'Content-Type: application/json' -d "$body")
   printf '%s\n' "$ANSWER" | clip 300
 }
 
@@ -58,7 +58,7 @@ finished() {
   [ "$1" = rollup ] && path=/_plugins/_rollup/jobs/$2/_explain key=rollup_metadata
   local i=0 status=
   while [ "$i" -lt 150 ]; do
-    ANSWER=$("${CURL[@]}" "$BS$path" | python3 -c 'import json,sys
+    ANSWER=$("${CURL[@]}" "$VS$path" | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 print(json.dumps({"aggregations": (d.get(sys.argv[1]) or {}).get(sys.argv[2]) or {}}))' "$2" "$key")
     status=$(printf '%s' "$ANSWER" | python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregations"].get("status", ""))')
@@ -71,9 +71,9 @@ print(json.dumps({"aggregations": (d.get(sys.argv[1]) or {}).get(sys.argv[2]) or
 step "an index shaped for aggregation: every field a keyword, a number or a date"
 # a job left from an earlier run is stopped and deleted with its index, or it
 # would write into the next run's summary while this one is still loading
-"${CURL[@]}" -X POST "$BS/_plugins/_transform/$SUM/_stop" > /dev/null 2>&1 || true
+"${CURL[@]}" -X POST "$VS/_plugins/_transform/$SUM/_stop" > /dev/null 2>&1 || true
 gone "/_plugins/_transform/$SUM?force=true"
-"${CURL[@]}" -X POST "$BS/_plugins/_rollup/jobs/$ROLL/_stop" > /dev/null 2>&1 || true
+"${CURL[@]}" -X POST "$VS/_plugins/_rollup/jobs/$ROLL/_stop" > /dev/null 2>&1 || true
 gone "/_plugins/_rollup/jobs/$ROLL"
 gone "/$IDX"; gone "/$SUM"; gone "/$ROLLED"
 reqf PUT "/$IDX" requests/01-an-index-shaped-for-aggregation.json
@@ -94,7 +94,7 @@ while :; do
 b = json.load(open(sys.argv[1]))
 if sys.argv[2]: b["aggs"]["lines"]["composite"]["after"] = json.loads(sys.argv[2])
 print(json.dumps(b))' requests/02-every-region-category-and-month-a.json "$after")
-  out=$("${CURL[@]}" -X GET "$BS/$IDX/_search" -H 'Content-Type: application/json' -d "$body")
+  out=$("${CURL[@]}" -X GET "$VS/$IDX/_search" -H 'Content-Type: application/json' -d "$body")
   page=$((page + 1))
   [ "$page" = 1 ] && printf '%s\n' "$out" | clip 700
   read -r n after < <(printf '%s' "$out" | python3 -c 'import json,sys
@@ -125,7 +125,7 @@ expect 'a["status"], a["stats"]["documents_processed"], a["stats"]["documents_in
 expect 'a["stats"]["pages_processed"]' "4" "three pages of buckets and the empty page that ends them"
 quiet POST "/$SUM/_refresh"
 expect_docs "$SUM" 240 "one document per composite bucket"
-ANSWER=$("${CURL[@]}" "$BS/_plugins/_transform/$SUM")
+ANSWER=$("${CURL[@]}" "$VS/_plugins/_transform/$SUM")
 printf '%s' "$ANSWER" | python3 -c 'import json,sys
 t = json.load(sys.stdin)["transform"]
 print("   the transform has turned itself off: enabled =", t["enabled"])'
@@ -140,7 +140,7 @@ OTHER=$raw expect '[(b["key"], round(b["revenue"]["value"], 2)) for b in a["regi
   "True" "every region's revenue is the same from either index"
 expect 'round(a["total"]["value"], 2)' "1030908.54" "the year's revenue, from the summary"
 note "--- a question only the summary is cheap for: the three best months"
-ANSWER=$("${CURL[@]}" -X GET "$BS/$SUM/_search" -H 'Content-Type: application/json' -d '{
+ANSWER=$("${CURL[@]}" -X GET "$VS/$SUM/_search" -H 'Content-Type: application/json' -d '{
   "size": 0,
   "aggs": { "months": {
     "date_histogram": { "field": "month", "calendar_interval": "month", "format": "yyyy-MM" },
@@ -160,7 +160,7 @@ expect 'a["status"], a["stats"]["documents_processed"], a["stats"]["rollups_inde
 ask GET "/$ROLLED/_search" requests/04-the-summary-answers-what-the-raw.json
 OTHER=$raw expect '[(b["key"], b["doc_count"], round(b["revenue"]["value"], 2)) for b in a["regions"]["buckets"]] == [(b["key"], b["doc_count"], round(b["revenue"]["value"], 2)) for b in other["regions"]["buckets"]]' \
   "True" "the same regions, the same sales counted, the same revenue as the raw index"
-ANSWER=$("${CURL[@]}" -X GET "$BS/$ROLLED/_search" -H 'Content-Type: application/json' -d '{
+ANSWER=$("${CURL[@]}" -X GET "$VS/$ROLLED/_search" -H 'Content-Type: application/json' -d '{
   "size": 0,
   "query": { "term": { "region": "north" } },
   "aggs": { "average_sale": { "avg": { "field": "revenue" } }, "sales": { "value_count": { "field": "revenue" } } }
@@ -169,7 +169,7 @@ printf '%s\n' "$ANSWER"
 expect 'round(a["average_sale"]["value"], 2), a["sales"]["value"]' "(341.17, 932)" \
   "an average put back together from the sums and counts the rollup kept"
 # refused with a 400, so asked without --fail-with-body
-ANSWER=$(curl -sS -X GET "$BS/$ROLLED/_search" -H 'Content-Type: application/json' -d '{ "size": 10, "query": { "match_all": {} } }')
+ANSWER=$(curl -sS -X GET "$VS/$ROLLED/_search" -H 'Content-Type: application/json' -d '{ "size": 10, "query": { "match_all": {} } }')
 printf '%s\n' "$ANSWER" | clip 300
 expect 'd["error"]["root_cause"][0]["reason"]' "Rollup search must have size explicitly set to 0, but found 10" \
   "a rollup has no single sales to show, and says so"

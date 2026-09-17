@@ -5,7 +5,7 @@ The script starts the nodes itself (so it can kill and restart them on
 their own data directories), drives writers and readers at them, and
 applies faults on a schedule:
 
-  partition   cut one node off through /_boost/chaos, heal after a while
+  partition   cut one node off through /_velo/chaos, heal after a while
   stop        SIGSTOP one node, SIGCONT after a while
   kill        SIGKILL one node, start it again on its data directory
   restart     SIGTERM one node (a graceful leave), start it again
@@ -24,8 +24,8 @@ against last-minute, so a leak shows as a slope.
 import argparse, json, os, random, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
 # the ports the three nodes take; another run at the same time asks for its
-# own with BOOSTSEARCH_TEST_PORTS=<first http>,<first transport>
-_base = os.environ.get("BOOSTSEARCH_TEST_PORTS", "9213,9303").split(",")
+# own with VELOSEARCH_TEST_PORTS=<first http>,<first transport>
+_base = os.environ.get("VELOSEARCH_TEST_PORTS", "9213,9303").split(",")
 HTTP = [int(_base[0]) + i for i in range(3)]
 TRANSPORT = [int(_base[1]) + i for i in range(3)]
 NAMES = ["n1", "n2", "n3"]
@@ -54,14 +54,14 @@ class Node:
     def start(self):
         env = dict(os.environ)
         env.update({
-            "BOOSTSEARCH_ADDR": self.http,
-            "BOOSTSEARCH_DATA": self.data,
-            "BOOSTSEARCH_TRANSPORT_PORT": str(TRANSPORT[self.i]),
-            "BOOSTSEARCH_NODE_NAME": self.name,
-            "BOOSTSEARCH_CHAOS": "1",
-            "BOOSTSEARCH_DISCOVERY_SEED_HOSTS": self.seeds,
-            "BOOSTSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES": ",".join(NAMES),
-            "BOOSTSEARCH_CLUSTER_DEBUG": "1",
+            "VELOSEARCH_ADDR": self.http,
+            "VELOSEARCH_DATA": self.data,
+            "VELOSEARCH_TRANSPORT_PORT": str(TRANSPORT[self.i]),
+            "VELOSEARCH_NODE_NAME": self.name,
+            "VELOSEARCH_CHAOS": "1",
+            "VELOSEARCH_DISCOVERY_SEED_HOSTS": self.seeds,
+            "VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES": ",".join(NAMES),
+            "VELOSEARCH_CLUSTER_DEBUG": "1",
         })
         self.proc = subprocess.Popen([self.binary], env=env, stdout=self.log, stderr=subprocess.STDOUT)
         self.up_since = time.monotonic()
@@ -299,7 +299,7 @@ def seq_span(nodes, holders, index):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default="./target/release/boostsearch")
+    ap.add_argument("--binary", default="./target/release/velosearch")
     ap.add_argument("--mode", choices=["chaos", "rolling", "soak"], default="chaos")
     ap.add_argument("--seconds", type=int, default=90)
     ap.add_argument("--rounds", type=int, default=2, help="rolling: how many times round the nodes")
@@ -373,13 +373,13 @@ def main():
             for n in nodes:
                 try:
                     cut = [x.name for x in others] if n is v else [v.name]
-                    call(f"http://{n.http}/_boost/chaos", "POST", {"cut": cut}, timeout=5)
+                    call(f"http://{n.http}/_velo/chaos", "POST", {"cut": cut}, timeout=5)
                 except Exception:
                     pass
             time.sleep(rng.uniform(4, 9))
             for n in nodes:
                 try:
-                    call(f"http://{n.http}/_boost/chaos", "POST", {"heal": True}, timeout=5)
+                    call(f"http://{n.http}/_velo/chaos", "POST", {"heal": True}, timeout=5)
                 except Exception:
                     pass
             note(f"heal {v.name}")

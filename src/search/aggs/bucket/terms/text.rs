@@ -41,7 +41,7 @@ fn tokens_of(store: &Store, targets: &[String], field: &str) -> Vec<(String, u64
         let searcher = g.reader.searcher();
         let dyn_field = g.fields.dynamic;
         let path = field.replace('.', "\u{1}");
-        let mut start = boostcore::Term::from_field_json_path(dyn_field, &path, true);
+        let mut start = velocore::Term::from_field_json_path(dyn_field, &path, true);
         start.append_type_and_str("");
         let prefix = start.serialized_value_bytes().to_vec();
         for reader in searcher.segment_readers() {

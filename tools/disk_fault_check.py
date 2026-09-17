@@ -17,7 +17,7 @@ The rules it must keep:
 The volume is a RAM disk made with hdiutil, which needs no password and is
 ejected at the end; nothing outside it is touched.
 
-    python3 tools/disk_fault_check.py [--binary ./target/release/boostsearch]
+    python3 tools/disk_fault_check.py [--binary ./target/release/velosearch]
 """
 
 import argparse
@@ -32,12 +32,12 @@ import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PORT = int(os.environ.get("BOOST_DISK_PORT", "9376"))
-TRANSPORT = int(os.environ.get("BOOST_DISK_TRANSPORT", "9476"))
+PORT = int(os.environ.get("VELO_DISK_PORT", "9376"))
+TRANSPORT = int(os.environ.get("VELO_DISK_TRANSPORT", "9476"))
 URL = f"http://127.0.0.1:{PORT}"
 INDEX = "diskfault"
 # how much of the volume the documents may take before the ballast goes in
-MB = int(os.environ.get("BOOST_DISK_MB", "128"))
+MB = int(os.environ.get("VELO_DISK_MB", "128"))
 
 
 def call(path, method="GET", body=None, ndjson=None, timeout=30):
@@ -80,13 +80,13 @@ def free_bytes(path):
 
 class Node:
     def __init__(self, binary, data, log):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("BOOSTSEARCH_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VELOSEARCH_")}
         env.update({
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{PORT}",
-            "BOOSTSEARCH_DATA": str(data),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(TRANSPORT),
-            "BOOSTSEARCH_TRANSPORT_INSECURE": "true",
-            "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED": "true",
+            "VELOSEARCH_ADDR": f"127.0.0.1:{PORT}",
+            "VELOSEARCH_DATA": str(data),
+            "VELOSEARCH_TRANSPORT_PORT": str(TRANSPORT),
+            "VELOSEARCH_TRANSPORT_INSECURE": "true",
+            "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true",
         })
         self.log = open(log, "ab")
         self.proc = subprocess.Popen([binary], env=env, stdout=self.log,
@@ -160,7 +160,7 @@ def present(ids):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target/release/boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target/release/velosearch"))
     ap.add_argument("--keep", action="store_true", help="leave the volume attached")
     a = ap.parse_args()
 

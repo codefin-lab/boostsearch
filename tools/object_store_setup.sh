@@ -5,7 +5,7 @@
 set -e
 docker rm -f bs-minio bs-azurite bs-gcs >/dev/null 2>&1 || true
 docker run -d --name bs-minio -p 9401:9000 \
-    -e MINIO_ROOT_USER=boostkey -e MINIO_ROOT_PASSWORD=boostsecret123 \
+    -e MINIO_ROOT_USER=velokey -e MINIO_ROOT_PASSWORD=velosecret123 \
     minio/minio:latest server /data >/dev/null
 docker run -d --name bs-azurite -p 9402:10000 \
     mcr.microsoft.com/azure-storage/azurite:latest azurite-blob --blobHost 0.0.0.0 >/dev/null
@@ -14,7 +14,7 @@ docker run -d --name bs-gcs -p 9403:4443 \
 
 until curl -s -o /dev/null http://127.0.0.1:9401/minio/health/live; do sleep 1; done
 docker run --rm --network host --entrypoint sh minio/mc:latest -c \
-    "mc alias set bs http://127.0.0.1:9401 boostkey boostsecret123 >/dev/null && mc mb --ignore-existing bs/snapshots" >/dev/null
+    "mc alias set bs http://127.0.0.1:9401 velokey velosecret123 >/dev/null && mc mb --ignore-existing bs/snapshots" >/dev/null
 
 sleep 3
 python3 - <<'PY'

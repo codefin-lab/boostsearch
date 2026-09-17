@@ -42,7 +42,7 @@ The longer form, and what this example needs of the node:
 Step 14 needs the node started with a reindex allowlist:
 
 ```bash
-BOOSTSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' ./target/release/boostsearch &
+VELOSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' ./target/release/velosearch &
 examples/14-reindex-migration/run.sh
 ```
 

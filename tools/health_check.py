@@ -18,7 +18,7 @@ With authentication on, the probe's endpoint is the only thing a caller with
 no credentials is let through to: the check asks `_cluster/health` and `/`
 too, and a write to the health path, and each must still be refused.
 
-    python3 tools/health_check.py [--binary ./target/release/boostsearch]
+    python3 tools/health_check.py [--binary ./target/release/velosearch]
 """
 
 import argparse
@@ -79,16 +79,16 @@ class Node:
         config = data / "config"
         (config / "security").mkdir(parents=True, exist_ok=True)
         if yml:
-            (config / "boostsearch.yml").write_text(yml)
+            (config / "velosearch.yml").write_text(yml)
         full = dict(os.environ)
-        for k in [k for k in full if k.startswith("BOOSTSEARCH_")]:
+        for k in [k for k in full if k.startswith("VELOSEARCH_")]:
             del full[k]
         full.update({
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{port}",
-            "BOOSTSEARCH_DATA": str(data),
-            "BOOSTSEARCH_CONFIG": str(config),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(port + 100),
-            "BOOSTSEARCH_NODE_NAME": name,
+            "VELOSEARCH_ADDR": f"127.0.0.1:{port}",
+            "VELOSEARCH_DATA": str(data),
+            "VELOSEARCH_CONFIG": str(config),
+            "VELOSEARCH_TRANSPORT_PORT": str(port + 100),
+            "VELOSEARCH_NODE_NAME": name,
         })
         full.update(env)
         self.log_path = data / "node.log"
@@ -124,7 +124,7 @@ class Node:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target/release/boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target/release/velosearch"))
     ap.add_argument("--keep", action="store_true", help="leave the data directories behind")
     a = ap.parse_args()
 
@@ -135,17 +135,17 @@ def main():
         f"plugins.security.ssl.http.pemkey_filepath: {CERTS / 'esnode-key.pem'}\n"
         f"plugins.security.ssl.http.pemtrustedcas_filepath: {CERTS / 'root-ca.pem'}\n"
     )
-    single = {"BOOSTSEARCH_TRANSPORT_INSECURE": "true"}
+    single = {"VELOSEARCH_TRANSPORT_INSECURE": "true"}
     kinds = [
-        ("security-off", 9388, {**single, "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED": "true"}, ""),
-        ("auth-on", 9390, {**single, "BOOSTSEARCH_DISABLED": "false"}, ""),
-        ("tls-on", 9392, {**single, "BOOSTSEARCH_DISABLED": "false"}, tls_yml),
+        ("security-off", 9388, {**single, "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true"}, ""),
+        ("auth-on", 9390, {**single, "VELOSEARCH_DISABLED": "false"}, ""),
+        ("tls-on", 9392, {**single, "VELOSEARCH_DISABLED": "false"}, tls_yml),
         # one of three whose other two never come: no cluster manager, ever
         ("unready", 9394, {
-            "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED": "true",
-            "BOOSTSEARCH_TRANSPORT_INSECURE": "true",
-            "BOOSTSEARCH_DISCOVERY_SEED_HOSTS": "127.0.0.1:9496,127.0.0.1:9498",
-            "BOOSTSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES": "unready,absent-1,absent-2",
+            "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true",
+            "VELOSEARCH_TRANSPORT_INSECURE": "true",
+            "VELOSEARCH_DISCOVERY_SEED_HOSTS": "127.0.0.1:9496,127.0.0.1:9498",
+            "VELOSEARCH_CLUSTER_INITIAL_CLUSTER_MANAGER_NODES": "unready,absent-1,absent-2",
         }, ""),
     ]
     results = []

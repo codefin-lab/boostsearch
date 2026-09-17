@@ -304,195 +304,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boostcore"
-version = "0.26.1"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "aho-corasick",
- "arc-swap",
- "base64 0.22.1",
- "bitpacking",
- "bon",
- "boostcore-bitpacker",
- "boostcore-columnar",
- "boostcore-common",
- "boostcore-query-grammar",
- "boostcore-stacker",
- "boostcore-tokenizer-api",
- "byteorder",
- "census",
- "crc32fast",
- "crossbeam-channel",
- "datasketches",
- "downcast-rs",
- "fastdivide",
- "fnv",
- "fs4",
- "htmlescape",
- "itertools",
- "levenshtein_automata",
- "libc",
- "log",
- "lru",
- "lz4_flex",
- "measure_time",
- "memmap2",
- "once_cell",
- "oneshot",
- "rayon",
- "regex",
- "rust-stemmers",
- "rustc-hash",
- "serde",
- "serde_json",
- "sketches-ddsketch",
- "smallvec",
- "tantivy-fst",
- "tempfile",
- "thiserror 2.0.20",
- "time",
- "typetag",
- "uuid",
- "winapi",
- "zstd",
-]
-
-[[package]]
-name = "boostcore-bitpacker"
-version = "0.10.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "bitpacking",
-]
-
-[[package]]
-name = "boostcore-columnar"
-version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "boostcore-bitpacker",
- "boostcore-common",
- "boostcore-sstable",
- "boostcore-stacker",
- "downcast-rs",
- "fastdivide",
- "itertools",
- "serde",
-]
-
-[[package]]
-name = "boostcore-common"
-version = "0.11.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "async-trait",
- "byteorder",
- "ownedbytes",
- "serde",
- "time",
-]
-
-[[package]]
-name = "boostcore-query-grammar"
-version = "0.26.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "fnv",
- "nom 7.1.3",
- "ordered-float",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "boostcore-sstable"
-version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "boostcore-bitpacker",
- "boostcore-common",
- "futures-util",
- "itertools",
- "tantivy-fst",
- "zstd",
-]
-
-[[package]]
-name = "boostcore-stacker"
-version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "boostcore-common",
- "murmurhash32",
-]
-
-[[package]]
-name = "boostcore-tokenizer-api"
-version = "0.7.0"
-source = "git+https://github.com/codefin-lab/boostcore?rev=b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed#b3819c5d1a2dbebf23ad0c8cbd659e2974c331ed"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "boostsearch"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "axum",
- "base64 0.22.1",
- "bcrypt",
- "boostcore",
- "boostcore-common",
- "cfb",
- "encoding_rs",
- "fancy-regex",
- "flate2",
- "form_urlencoded",
- "hmac",
- "hyper",
- "hyper-util",
- "icu_normalizer",
- "icu_properties",
- "icu_segmenter",
- "jsonwebtoken",
- "ldap3",
- "libc",
- "libmimalloc-sys",
- "lindera",
- "maxminddb",
- "md5 0.7.0",
- "mimalloc",
- "parking_lot",
- "percent-encoding",
- "phonenumber",
- "postcard",
- "quick-xml 0.42.0",
- "rayon",
- "rcgen",
- "regex",
- "rphonetic",
- "rsa",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha1",
- "sha2",
- "sha3",
- "tantivy-fst",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "x509-parser 0.16.0",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3433,6 +3244,195 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "velocore"
+version = "0.26.1"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "base64 0.22.1",
+ "bitpacking",
+ "bon",
+ "byteorder",
+ "census",
+ "crc32fast",
+ "crossbeam-channel",
+ "datasketches",
+ "downcast-rs",
+ "fastdivide",
+ "fnv",
+ "fs4",
+ "htmlescape",
+ "itertools",
+ "levenshtein_automata",
+ "libc",
+ "log",
+ "lru",
+ "lz4_flex",
+ "measure_time",
+ "memmap2",
+ "once_cell",
+ "oneshot",
+ "rayon",
+ "regex",
+ "rust-stemmers",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sketches-ddsketch",
+ "smallvec",
+ "tantivy-fst",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "typetag",
+ "uuid",
+ "velocore-bitpacker",
+ "velocore-columnar",
+ "velocore-common",
+ "velocore-query-grammar",
+ "velocore-stacker",
+ "velocore-tokenizer-api",
+ "winapi",
+ "zstd",
+]
+
+[[package]]
+name = "velocore-bitpacker"
+version = "0.10.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "bitpacking",
+]
+
+[[package]]
+name = "velocore-columnar"
+version = "0.7.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "downcast-rs",
+ "fastdivide",
+ "itertools",
+ "serde",
+ "velocore-bitpacker",
+ "velocore-common",
+ "velocore-sstable",
+ "velocore-stacker",
+]
+
+[[package]]
+name = "velocore-common"
+version = "0.11.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "ownedbytes",
+ "serde",
+ "time",
+]
+
+[[package]]
+name = "velocore-query-grammar"
+version = "0.26.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "fnv",
+ "nom 7.1.3",
+ "ordered-float",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "velocore-sstable"
+version = "0.7.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "futures-util",
+ "itertools",
+ "tantivy-fst",
+ "velocore-bitpacker",
+ "velocore-common",
+ "zstd",
+]
+
+[[package]]
+name = "velocore-stacker"
+version = "0.7.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "murmurhash32",
+ "velocore-common",
+]
+
+[[package]]
+name = "velocore-tokenizer-api"
+version = "0.7.0"
+source = "git+https://github.com/codefin-lab/velocore?rev=57fcb12c27736f95b98577f64616879b5c811b0b#57fcb12c27736f95b98577f64616879b5c811b0b"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "velosearch"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bcrypt",
+ "cfb",
+ "encoding_rs",
+ "fancy-regex",
+ "flate2",
+ "form_urlencoded",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_segmenter",
+ "jsonwebtoken",
+ "ldap3",
+ "libc",
+ "libmimalloc-sys",
+ "lindera",
+ "maxminddb",
+ "md5 0.7.0",
+ "mimalloc",
+ "parking_lot",
+ "percent-encoding",
+ "phonenumber",
+ "postcard",
+ "quick-xml 0.42.0",
+ "rayon",
+ "rcgen",
+ "regex",
+ "rphonetic",
+ "rsa",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha1",
+ "sha2",
+ "sha3",
+ "tantivy-fst",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "velocore",
+ "velocore-common",
+ "x509-parser 0.16.0",
+]
 
 [[package]]
 name = "version_check"

@@ -15,7 +15,7 @@ pub(super) fn highlight(
     opts: &super::Opts,
     query: &Option<Value>,
     mapping: &crate::store::Mapping,
-    index: &boostcore::Index,
+    index: &velocore::Index,
     analysis: &crate::analysis::Registry,
 ) -> Vec<String> {
     let asked = match &opts.highlight_query {
@@ -214,7 +214,7 @@ pub(crate) fn without_markup(text: &str) -> (String, Vec<Annotation>) {
 /// text, markup and all -- an annotation nobody asked about is not part of
 /// the answer to this query.
 fn mark_annotated(
-    index: &boostcore::Index,
+    index: &velocore::Index,
     text: &str,
     queries: &[(String, bool)],
     hits: &[String],
@@ -276,7 +276,7 @@ fn mark_annotated(
 }
 
 pub(crate) fn mark_terms(
-    index: &boostcore::Index,
+    index: &velocore::Index,
     text: &str,
     queries: &[(String, bool)],
     analyzers: &[Option<String>],

@@ -609,7 +609,7 @@ fn named_host(host: &str) -> String {
 /// unless it is named, which is why a node with no setting refuses every
 /// remote.
 fn remote_allowed(named: &str) -> bool {
-    let Ok(listed) = std::env::var("BOOSTSEARCH_REINDEX_ALLOWLIST") else {
+    let Ok(listed) = std::env::var("VELOSEARCH_REINDEX_ALLOWLIST") else {
         return false;
     };
     let (host, port) = match named.rsplit_once(':') {

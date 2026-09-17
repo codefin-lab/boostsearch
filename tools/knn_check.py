@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
 failures = []
 
 
@@ -222,10 +222,10 @@ def the_mapping_is_checked():
 def vectors_outlive_the_node():
     """The table lives beside the index, and is worked out again from the
     documents when what was written down does not match them."""
-    binary = os.environ.get("BOOST_BINARY")
-    start = os.environ.get("BOOST_START")
+    binary = os.environ.get("VELO_BINARY")
+    start = os.environ.get("VELO_START")
     if not start:
-        print("       (skipped the restart: set BOOST_START to the script that starts the node)")
+        print("       (skipped the restart: set VELO_START to the script that starts the node)")
         return
     before = ids_of(
         req("POST", "/knn-basic/_search", {"query": {"knn": {"v": {"vector": [1.0, 0.0, 0.0], "k": 2}}}})
@@ -237,10 +237,10 @@ def vectors_outlive_the_node():
             "the restart could not be measured: the search found nothing before it"
         )
         return
-    # only this node, named outright: a bare `release/boostsearch` pattern
+    # only this node, named outright: a bare `release/velosearch` pattern
     # kills every node on the machine, including other people's
     if not binary:
-        print("       (skipped the restart: set BOOST_BINARY to the node's own binary path)")
+        print("       (skipped the restart: set VELO_BINARY to the node's own binary path)")
         return
     subprocess.run(["pkill", "-9", "-f", binary], check=False)
     time.sleep(3)

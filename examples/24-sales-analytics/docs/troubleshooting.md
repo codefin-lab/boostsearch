@@ -6,7 +6,7 @@
 `make serve` starts the node; running the script directly needs the address:
 
 ```bash
-BS=http://127.0.0.1:9284 ./run.sh
+VS=http://127.0.0.1:9284 ./run.sh
 ```
 
 or a `.env` copied from `.env.example`.

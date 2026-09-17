@@ -1,7 +1,7 @@
 //! Where a word stands in the field it was written in.
 //!
 //! Most queries ask whether a word is in a document. A span query asks where:
-//! near another word, before the fifth one, inside another span. BoostCore
+//! near another word, before the fifth one, inside another span. VeloCore
 //! keeps where each word stands; the span clauses are walked over those
 //! places here, the way Lucene walks them.
 
@@ -9,31 +9,31 @@ use super::positions::{
     LuceneHeap, NO_MORE, SegmentPositions, Similarity, docs_of, intersect, norms_for, union,
 };
 use super::*;
-use boostcore::DocSet;
-use boostcore::postings::Postings;
+use velocore::DocSet;
+use velocore::postings::Postings;
 
 /// The documents a pass over the positions kept, in order.
 pub(crate) struct KeptDocs {
-    docs: Vec<boostcore::DocId>,
+    docs: Vec<velocore::DocId>,
     at: usize,
 }
 
 impl KeptDocs {
-    pub(crate) fn new(docs: Vec<boostcore::DocId>) -> KeptDocs {
+    pub(crate) fn new(docs: Vec<velocore::DocId>) -> KeptDocs {
         KeptDocs { docs, at: 0 }
     }
 }
 
-impl boostcore::DocSet for KeptDocs {
-    fn advance(&mut self) -> boostcore::DocId {
+impl velocore::DocSet for KeptDocs {
+    fn advance(&mut self) -> velocore::DocId {
         self.at += 1;
         self.doc()
     }
 
-    fn doc(&self) -> boostcore::DocId {
+    fn doc(&self) -> velocore::DocId {
         match self.docs.get(self.at) {
             Some(doc) => *doc,
-            None => boostcore::TERMINATED,
+            None => velocore::TERMINATED,
         }
     }
 
@@ -78,10 +78,10 @@ impl Clone for SpanUnion {
 }
 
 impl Query for SpanUnion {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let bm25 = match scoring {
             EnableScoring::Enabled { statistics_provider, .. } => {
-                Some(boostcore::query::Bm25Weight::for_terms(statistics_provider, &self.terms)?)
+                Some(velocore::query::Bm25Weight::for_terms(statistics_provider, &self.terms)?)
             }
             EnableScoring::Disabled { .. } => None,
         };
@@ -91,7 +91,7 @@ impl Query for SpanUnion {
 
 struct SpanUnionWeight {
     terms: Vec<Term>,
-    bm25: Option<boostcore::query::Bm25Weight>,
+    bm25: Option<velocore::query::Bm25Weight>,
     flat: bool,
 }
 
@@ -99,9 +99,9 @@ impl SpanUnionWeight {
     /// How often any of the words stands in each document of this segment.
     fn frequencies(
         &self,
-        reader: &boostcore::SegmentReader,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, u32)>> {
-        let mut totals: std::collections::BTreeMap<boostcore::DocId, u32> =
+        reader: &velocore::SegmentReader,
+    ) -> velocore::Result<Vec<(velocore::DocId, u32)>> {
+        let mut totals: std::collections::BTreeMap<velocore::DocId, u32> =
             std::collections::BTreeMap::new();
         for term in &self.terms {
             let inverted = reader.inverted_index(term.field())?;
@@ -109,7 +109,7 @@ impl SpanUnionWeight {
             else {
                 continue;
             };
-            while postings.doc() != boostcore::TERMINATED {
+            while postings.doc() != velocore::TERMINATED {
                 *totals.entry(postings.doc()).or_default() += postings.term_freq();
                 postings.advance();
             }
@@ -121,19 +121,19 @@ impl SpanUnionWeight {
 impl Weight for SpanUnionWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let found = self.frequencies(reader)?;
         let Some(bm25) = self.bm25.clone() else {
             let docs = found.into_iter().map(|(doc, _)| doc).collect();
-            return Ok(Box::new(boostcore::query::ConstScorer::new(
+            return Ok(Box::new(velocore::query::ConstScorer::new(
                 KeptDocs { docs, at: 0 },
                 boost,
             )));
         };
         let Some(first) = self.terms.first() else {
-            return Ok(Box::new(boostcore::query::EmptyScorer));
+            return Ok(Box::new(velocore::query::EmptyScorer));
         };
         let norms = match reader.fieldnorms_reader_for_term(first)? {
             Some(norms) => norms,
@@ -141,7 +141,7 @@ impl Weight for SpanUnionWeight {
         };
         // a flat score reads every document as one word long holding the
         // term once
-        let one = boostcore::fieldnorm::FieldNormReader::fieldnorm_to_id(1);
+        let one = velocore::fieldnorm::FieldNormReader::fieldnorm_to_id(1);
         let flat = self.flat;
         let scored = found
             .into_iter()
@@ -155,12 +155,12 @@ impl Weight for SpanUnionWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let freq = self.frequencies(reader)?.into_iter().find(|(at, _)| *at == doc).map(|(_, f)| f);
         let Some(freq) = freq else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the span query".to_string(),
             ));
         };
@@ -172,33 +172,33 @@ impl Weight for SpanUnionWeight {
                 };
                 Ok(bm25.explain(norms.fieldnorm_id(doc), freq))
             }
-            _ => Ok(boostcore::query::Explanation::new("span", 1.0)),
+            _ => Ok(velocore::query::Explanation::new("span", 1.0)),
         }
     }
 }
 
 /// The documents a span union matched, each with the score it was given.
 pub(crate) struct ScoredDocs {
-    docs: Vec<(boostcore::DocId, boostcore::Score)>,
+    docs: Vec<(velocore::DocId, velocore::Score)>,
     at: usize,
 }
 
 impl ScoredDocs {
-    pub(crate) fn new(docs: Vec<(boostcore::DocId, boostcore::Score)>) -> ScoredDocs {
+    pub(crate) fn new(docs: Vec<(velocore::DocId, velocore::Score)>) -> ScoredDocs {
         ScoredDocs { docs, at: 0 }
     }
 }
 
-impl boostcore::DocSet for ScoredDocs {
-    fn advance(&mut self) -> boostcore::DocId {
+impl velocore::DocSet for ScoredDocs {
+    fn advance(&mut self) -> velocore::DocId {
         self.at += 1;
         self.doc()
     }
 
-    fn doc(&self) -> boostcore::DocId {
+    fn doc(&self) -> velocore::DocId {
         match self.docs.get(self.at) {
             Some((doc, _)) => *doc,
-            None => boostcore::TERMINATED,
+            None => velocore::TERMINATED,
         }
     }
 
@@ -207,8 +207,8 @@ impl boostcore::DocSet for ScoredDocs {
     }
 }
 
-impl boostcore::query::Scorer for ScoredDocs {
-    fn score(&mut self) -> boostcore::Score {
+impl velocore::query::Scorer for ScoredDocs {
+    fn score(&mut self) -> velocore::Score {
         self.docs.get(self.at).map(|(_, score)| *score).unwrap_or(0.0)
     }
 }
@@ -254,14 +254,14 @@ impl Clone for SpanPaths {
 }
 
 impl Query for SpanPaths {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let bm25 = match scoring {
             EnableScoring::Enabled { statistics_provider, .. } if !self.terms.is_empty() => {
-                Some(boostcore::query::Bm25Weight::for_terms(statistics_provider, &self.terms)?)
+                Some(velocore::query::Bm25Weight::for_terms(statistics_provider, &self.terms)?)
             }
             _ => None,
         };
-        let ways: boostcore::Result<Vec<Box<dyn Weight>>> =
+        let ways: velocore::Result<Vec<Box<dyn Weight>>> =
             self.ways.iter().map(|way| way.weight(scoring)).collect();
         Ok(Box::new(SpanPathsWeight { first: self.terms.first().cloned(), ways: ways?, bm25 }))
     }
@@ -270,20 +270,20 @@ impl Query for SpanPaths {
 struct SpanPathsWeight {
     first: Option<Term>,
     ways: Vec<Box<dyn Weight>>,
-    bm25: Option<boostcore::query::Bm25Weight>,
+    bm25: Option<velocore::query::Bm25Weight>,
 }
 
 impl SpanPathsWeight {
     /// How many of the ways stand in each document of this segment.
     fn frequencies(
         &self,
-        reader: &boostcore::SegmentReader,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, u32)>> {
-        let mut totals: std::collections::BTreeMap<boostcore::DocId, u32> =
+        reader: &velocore::SegmentReader,
+    ) -> velocore::Result<Vec<(velocore::DocId, u32)>> {
+        let mut totals: std::collections::BTreeMap<velocore::DocId, u32> =
             std::collections::BTreeMap::new();
         for way in &self.ways {
             let mut scorer = way.scorer(reader, 1.0)?;
-            while scorer.doc() != boostcore::TERMINATED {
+            while scorer.doc() != velocore::TERMINATED {
                 *totals.entry(scorer.doc()).or_default() += 1;
                 scorer.advance();
             }
@@ -295,13 +295,13 @@ impl SpanPathsWeight {
 impl Weight for SpanPathsWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let found = self.frequencies(reader)?;
         let (Some(bm25), Some(first)) = (self.bm25.clone(), self.first.as_ref()) else {
             let docs = found.into_iter().map(|(doc, _)| doc).collect();
-            return Ok(Box::new(boostcore::query::ConstScorer::new(
+            return Ok(Box::new(velocore::query::ConstScorer::new(
                 KeptDocs { docs, at: 0 },
                 boost,
             )));
@@ -319,12 +319,12 @@ impl Weight for SpanPathsWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let freq = self.frequencies(reader)?.into_iter().find(|(at, _)| *at == doc).map(|(_, f)| f);
         let Some(freq) = freq else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the span query".to_string(),
             ));
         };
@@ -336,7 +336,7 @@ impl Weight for SpanPathsWeight {
                 };
                 Ok(bm25.explain(norms.fieldnorm_id(doc), freq))
             }
-            _ => Ok(boostcore::query::Explanation::new("span", 1.0)),
+            _ => Ok(velocore::query::Explanation::new("span", 1.0)),
         }
     }
 }
@@ -450,12 +450,12 @@ impl SpanTree {
     /// The documents of a segment that could match, `None` for all of them.
     fn candidates(
         &self,
-        docs: &dyn Fn(&Term) -> Vec<boostcore::DocId>,
-    ) -> Option<Vec<boostcore::DocId>> {
+        docs: &dyn Fn(&Term) -> Vec<velocore::DocId>,
+    ) -> Option<Vec<velocore::DocId>> {
         fn both(
-            a: Option<Vec<boostcore::DocId>>,
-            b: Option<Vec<boostcore::DocId>>,
-        ) -> Option<Vec<boostcore::DocId>> {
+            a: Option<Vec<velocore::DocId>>,
+            b: Option<Vec<velocore::DocId>>,
+        ) -> Option<Vec<velocore::DocId>> {
             match (a, b) {
                 (None, other) | (other, None) => other,
                 (Some(a), Some(b)) => Some(intersect(&a, &b)),
@@ -1104,7 +1104,7 @@ impl SpanQuery {
 }
 
 impl Query for SpanQuery {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         // a masking clause on its own is its inner clause: the field it
         // claims only matters beside the clauses of that field
         let mut root = &self.tree;
@@ -1141,10 +1141,10 @@ impl SpanWeight {
     /// Each document of the segment that matches, with its sloppy frequency.
     fn frequencies(
         &self,
-        reader: &boostcore::SegmentReader,
-        only: Option<boostcore::DocId>,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, f32)>> {
-        let mut lists: Vec<Vec<boostcore::DocId>> = Vec::new();
+        reader: &velocore::SegmentReader,
+        only: Option<velocore::DocId>,
+    ) -> velocore::Result<Vec<(velocore::DocId, f32)>> {
+        let mut lists: Vec<Vec<velocore::DocId>> = Vec::new();
         for term in &self.terms {
             lists.push(docs_of(reader, term)?);
         }
@@ -1180,13 +1180,13 @@ impl SpanWeight {
 impl Weight for SpanWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let found = self.frequencies(reader, None)?;
         let (Some(similarity), Some(probe)) = (&self.similarity, &self.probe) else {
             let docs = found.into_iter().map(|(doc, _)| doc).collect();
-            return Ok(Box::new(boostcore::query::ConstScorer::new(KeptDocs::new(docs), boost)));
+            return Ok(Box::new(velocore::query::ConstScorer::new(KeptDocs::new(docs), boost)));
         };
         let norms = norms_for(reader, probe)?;
         let scored = found
@@ -1198,11 +1198,11 @@ impl Weight for SpanWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let Some((_, freq)) = self.frequencies(reader, Some(doc))?.into_iter().next() else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the span query".to_string(),
             ));
         };
@@ -1213,7 +1213,7 @@ impl Weight for SpanWeight {
             _ => 1.0,
         };
         let mut explanation =
-            boostcore::query::Explanation::new("weight(spans), result of: score(freq)", score);
+            velocore::query::Explanation::new("weight(spans), result of: score(freq)", score);
         explanation.add_const("freq, sloppy frequency of the spans", freq);
         Ok(explanation)
     }

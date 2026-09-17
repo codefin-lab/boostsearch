@@ -27,7 +27,7 @@ pub async fn bulk(
     let mut touched: Vec<String> = Vec::new();
 
     // Split the ndjson into operations first, so the expensive part -- parsing
-    // each document and building its BoostCore form -- can run across cores.
+    // each document and building its VeloCore form -- can run across cores.
     struct Op<'a> {
         op: String,
         meta: Value,
@@ -124,7 +124,7 @@ pub async fn bulk(
         })
     };
     let prepared: Vec<Option<std::result::Result<(Value, String), String>>> =
-        if std::env::var("BOOSTSEARCH_SERIAL_BULK").is_ok() {
+        if std::env::var("VELOSEARCH_SERIAL_BULK").is_ok() {
             ops.iter().map(prepare).collect()
         } else {
             use rayon::prelude::*;
@@ -700,7 +700,7 @@ pub async fn bulk(
                             if p.get("error_trace").map(|v| v != "false").unwrap_or(false) {
                                 error["stack_trace"] = json!(format!(
                                     "[[{idx}][0]] DocumentMissingException[{reason}] \
-                                     at boostsearch::api::bulk (src/api.rs)"
+                                     at velosearch::api::bulk (src/api.rs)"
                                 ));
                             }
                             json!({"update": {

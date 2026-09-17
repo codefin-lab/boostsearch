@@ -82,7 +82,7 @@ pub(crate) fn date_histogram_keys(
 
 /// A date histogram stepped by calendar units.
 ///
-/// A month is not a fixed number of milliseconds, so BoostCore's histogram --
+/// A month is not a fixed number of milliseconds, so VeloCore's histogram --
 /// which steps by a constant -- cannot express one. Each bucket is instead a
 /// range filter run through the ordinary query path, which also means
 /// sub-aggregations come for free. The cost is one search per bucket, which
@@ -142,12 +142,12 @@ pub(crate) fn run_calendar_histogram(
     main_query: &Option<Value>,
     def: &Value,
 ) -> std::result::Result<Value, Response> {
-    use boostcore::time::{Duration, OffsetDateTime};
+    use velocore::time::{Duration, OffsetDateTime};
 
     let spec = def.get("date_histogram").cloned().unwrap_or(json!({}));
     let field = spec.get("field").and_then(|f| f.as_str()).unwrap_or("").to_string();
     // a histogram steps by a calendar unit or by a fixed length; the fixed
-    // one only comes through here when a zone means BoostCore cannot do it
+    // one only comes through here when a zone means VeloCore cannot do it
     let fixed = spec
         .get("fixed_interval")
         .and_then(|v| v.as_str())
@@ -182,7 +182,7 @@ pub(crate) fn run_calendar_histogram(
     });
     let bounds = spec.get("hard_bounds").or_else(|| spec.get("extended_bounds"));
     // A date is a number in the index: milliseconds, or nanoseconds for a
-    // date_nanos. A date_range keeps its endpoints as text, which BoostCore
+    // date_nanos. A date_range keeps its endpoints as text, which VeloCore
     // reads back as a date column counting nanoseconds.
     let per_ns: f64 = targets
         .iter()
@@ -436,7 +436,7 @@ pub(crate) fn run_calendar_histogram(
 /// `offset` as written on a date histogram: a signed count of fixed time
 /// units. Calendar units are not allowed here -- only lengths that are the
 /// same wherever on the calendar they land.
-pub(crate) fn parse_offset(s: &str) -> Option<boostcore::time::Duration> {
+pub(crate) fn parse_offset(s: &str) -> Option<velocore::time::Duration> {
     let s = s.trim();
     let (sign, rest) = match s.strip_prefix('-') {
         Some(r) => (-1, r),
@@ -447,11 +447,11 @@ pub(crate) fn parse_offset(s: &str) -> Option<boostcore::time::Duration> {
     let n: i64 = n.parse().ok()?;
     let n = n * sign;
     Some(match unit {
-        "ms" => boostcore::time::Duration::milliseconds(n),
-        "s" => boostcore::time::Duration::seconds(n),
-        "m" => boostcore::time::Duration::minutes(n),
-        "h" | "H" => boostcore::time::Duration::hours(n),
-        "d" => boostcore::time::Duration::days(n),
+        "ms" => velocore::time::Duration::milliseconds(n),
+        "s" => velocore::time::Duration::seconds(n),
+        "m" => velocore::time::Duration::minutes(n),
+        "h" | "H" => velocore::time::Duration::hours(n),
+        "d" => velocore::time::Duration::days(n),
         _ => return None,
     })
 }
@@ -459,9 +459,9 @@ pub(crate) fn parse_offset(s: &str) -> Option<boostcore::time::Duration> {
 /// A date written in the zone it is being reported in, which is what puts the
 /// offset on the end of it in place of the `Z`.
 pub(crate) fn iso_millis_at(
-    dt: boostcore::time::OffsetDateTime,
+    dt: velocore::time::OffsetDateTime,
     zone: &str,
-    offset: boostcore::time::Duration,
+    offset: velocore::time::Duration,
 ) -> String {
     if zone.is_empty() || offset.is_zero() {
         return iso_millis(dt);
@@ -485,7 +485,7 @@ pub(crate) fn iso_millis_at(
     )
 }
 
-pub(crate) fn iso_millis(dt: boostcore::time::OffsetDateTime) -> String {
+pub(crate) fn iso_millis(dt: velocore::time::OffsetDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         dt.year(),

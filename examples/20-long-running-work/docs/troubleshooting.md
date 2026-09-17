@@ -77,7 +77,7 @@ this example's node on another port and point the example at it:
 
 ```bash
 PORT=9287 make serve
-BS=http://127.0.0.1:9287 make run
+VS=http://127.0.0.1:9287 make run
 ```
 
 ## Cleaning up

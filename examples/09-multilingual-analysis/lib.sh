@@ -2,7 +2,7 @@
 # example directory can be taken away on its own and still run. Source it;
 # do not run it.
 #
-#   BS    where the server listens (default http://127.0.0.1:9200)
+#   VS    where the server listens (default http://127.0.0.1:9200)
 #   AUTH  curl credentials, for the examples that turn security on
 #
 # Every example is written to be run twice: it deletes what it creates before
@@ -14,14 +14,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # .env is the example's own defaults; anything already in the environment wins,
-# so `BS=... ./run.sh` is not silently overridden by a file
-_bs_from_env="${BS-}"
+# so `VS=... ./run.sh` is not silently overridden by a file
+_vs_from_env="${VS-}"
 _auth_from_env="${AUTH-}"
 [ -f .env ] && . ./.env
-[ -n "$_bs_from_env" ] && BS="$_bs_from_env"
+[ -n "$_vs_from_env" ] && VS="$_vs_from_env"
 [ -n "$_auth_from_env" ] && AUTH="$_auth_from_env"
 
-BS="${BS:-http://127.0.0.1:9200}"
+VS="${VS:-http://127.0.0.1:9200}"
 AUTH="${AUTH:-}"
 CURL=(curl -sS --fail-with-body)
 [ -n "$AUTH" ] && CURL+=(-u "$AUTH")
@@ -35,16 +35,16 @@ note() { printf '   %s\n' "$*"; }
 req() {
   local m=$1 p=$2 b=${3-}
   if [ -n "$b" ]; then
-    "${CURL[@]}" -X "$m" "$BS$p" -H 'Content-Type: application/json' -d "$b"
+    "${CURL[@]}" -X "$m" "$VS$p" -H 'Content-Type: application/json' -d "$b"
   else
-    "${CURL[@]}" -X "$m" "$BS$p"
+    "${CURL[@]}" -X "$m" "$VS$p"
   fi
   echo
 }
 
 # reqf METHOD PATH FILE -- the same, with the body read from requests/
 reqf() {
-  "${CURL[@]}" -X "$1" "$BS$2" -H 'Content-Type: application/json' --data-binary "@$3"
+  "${CURL[@]}" -X "$1" "$VS$2" -H 'Content-Type: application/json' --data-binary "@$3"
   echo
 }
 
@@ -55,17 +55,17 @@ quiet() { req "$@" > /dev/null; }
 quietf() { reqf "$@" > /dev/null; }
 
 # gone PATH -- delete something that may or may not be there
-gone() { "${CURL[@]}" -X DELETE "$BS$1" > /dev/null 2>&1 || true; }
+gone() { "${CURL[@]}" -X DELETE "$VS$1" > /dev/null 2>&1 || true; }
 
 # ndjson PATH FILE -- a bulk-shaped body from a file
 ndjson() {
-  "${CURL[@]}" -X POST "$BS$1" -H 'Content-Type: application/x-ndjson' --data-binary "@$2"
+  "${CURL[@]}" -X POST "$VS$1" -H 'Content-Type: application/x-ndjson' --data-binary "@$2"
   echo
 }
 
 # bulk PATH -- a bulk-shaped body from standard input
 bulk() {
-  "${CURL[@]}" -X POST "$BS$1" -H 'Content-Type: application/x-ndjson' --data-binary @-
+  "${CURL[@]}" -X POST "$VS$1" -H 'Content-Type: application/x-ndjson' --data-binary @-
   echo
 }
 
@@ -94,7 +94,7 @@ _fails=0
 
 # docs INDEX -- how many documents it holds, 0 if it is not there
 docs() {
-  "${CURL[@]}" "$BS/$1/_count" 2>/dev/null \
+  "${CURL[@]}" "$VS/$1/_count" 2>/dev/null \
     | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("count", 0))
 except Exception: print(0)'
@@ -132,7 +132,7 @@ expect_at_least() {
 expect_hits() {
   local want=$1 m=$2 p=$3 b=$4 what=${5-}
   local got
-  got=$("${CURL[@]}" -X "$m" "$BS$p" -H 'Content-Type: application/json' -d "$b" 2>/dev/null \
+  got=$("${CURL[@]}" -X "$m" "$VS$p" -H 'Content-Type: application/json' -d "$b" 2>/dev/null \
     | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["hits"]["total"]["value"])
 except Exception: print(-1)')
@@ -159,15 +159,15 @@ done_() {
 # green INDEX -- wait for the index to be ready to answer
 green() {
   local i=0
-  until "${CURL[@]}" "$BS/_cluster/health/$1?wait_for_status=yellow&timeout=5s" > /dev/null 2>&1; do
+  until "${CURL[@]}" "$VS/_cluster/health/$1?wait_for_status=yellow&timeout=5s" > /dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -gt 12 ] && { echo "the index never went yellow" >&2; return 1; }
     sleep 1
   done
 }
 
 alive() {
-  "${CURL[@]}" "$BS" > /dev/null 2>&1 || {
-    echo "no server at $BS -- see this example's README, or set BS" >&2
+  "${CURL[@]}" "$VS" > /dev/null 2>&1 || {
+    echo "no server at $VS -- see this example's README, or set VS" >&2
     exit 1
   }
 }

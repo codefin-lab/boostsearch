@@ -12,14 +12,14 @@
 //! rules give 0.5741, 0.4760 and 0.4715, which is what OpenSearch 3.8.0
 //! answers.
 //!
-//! BoostCore keeps what this needs per path of a JSON field -- how many
+//! VeloCore keeps what this needs per path of a JSON field -- how many
 //! documents hold the path and how many tokens it holds, and each document's
 //! length there -- so nothing is estimated.
 
 use super::*;
-use boostcore::DocSet;
-use boostcore::fieldnorm::FieldNormReader;
-use boostcore::postings::Postings;
+use velocore::DocSet;
+use velocore::fieldnorm::FieldNormReader;
+use velocore::postings::Postings;
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
@@ -46,7 +46,7 @@ fn path_of(term: &Term) -> Option<Vec<u8>> {
 }
 
 impl Query for CombinedTerm {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         let stats = match scoring {
             EnableScoring::Enabled { statistics_provider, .. } => {
                 let mut doc_count = 0u64;
@@ -93,16 +93,16 @@ impl CombinedTermWeight {
     /// its length over the pseudo-field.
     fn found(
         &self,
-        reader: &boostcore::SegmentReader,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, f32, f32)>> {
-        let mut freqs: std::collections::BTreeMap<boostcore::DocId, f32> = Default::default();
+        reader: &velocore::SegmentReader,
+    ) -> velocore::Result<Vec<(velocore::DocId, f32, f32)>> {
+        let mut freqs: std::collections::BTreeMap<velocore::DocId, f32> = Default::default();
         let mut norms: Vec<(FieldNormReader, f32)> = Vec::new();
         for (term, weight) in &self.terms {
             let inverted = reader.inverted_index(term.field())?;
             if let Some(mut postings) =
                 inverted.read_postings(term, IndexRecordOption::WithFreqs)?
             {
-                while postings.doc() != boostcore::TERMINATED {
+                while postings.doc() != velocore::TERMINATED {
                     *freqs.entry(postings.doc()).or_default() +=
                         weight * postings.term_freq() as f32;
                     postings.advance();
@@ -143,13 +143,13 @@ fn bm25f(idf: f32, average: f32, freq: f32, length: f32) -> f32 {
 impl Weight for CombinedTermWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let found = self.found(reader)?;
         let Some((idf, average)) = self.stats else {
             let docs = found.into_iter().map(|(doc, _, _)| doc).collect();
-            return Ok(Box::new(boostcore::query::ConstScorer::new(
+            return Ok(Box::new(velocore::query::ConstScorer::new(
                 crate::query::spans::KeptDocs::new(docs),
                 boost,
             )));
@@ -163,19 +163,19 @@ impl Weight for CombinedTermWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let Some((_, freq, length)) = self.found(reader)?.into_iter().find(|(d, _, _)| *d == doc)
         else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the combined_fields term".to_string(),
             ));
         };
         let Some((idf, average)) = self.stats else {
-            return Ok(boostcore::query::Explanation::new("combined_fields", 1.0));
+            return Ok(velocore::query::Explanation::new("combined_fields", 1.0));
         };
-        let mut e = boostcore::query::Explanation::new(
+        let mut e = velocore::query::Explanation::new(
             "combined_fields BM25F",
             bm25f(idf, average, freq, length),
         );

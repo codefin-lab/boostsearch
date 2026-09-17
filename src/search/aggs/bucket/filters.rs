@@ -138,7 +138,7 @@ fn cap_nested_pages(answer: &mut Value, sub_aggs: &Option<Value>, objects: u64) 
     }
 }
 
-/// Run one aggregation that BoostCore cannot parse itself.
+/// Run one aggregation that VeloCore cannot parse itself.
 ///
 /// These are computed by asking a question per bucket rather than by walking
 /// the documents once, so any of them may appear inside any other: what a
@@ -209,7 +209,7 @@ pub(crate) fn run_peeled_agg(
     {
         run_range_field_histogram(store, targets, query_json, def)
     } else if def.get("histogram").is_some() || def.get("range").is_some() {
-        // a histogram or a range BoostCore can bucket, here only because of
+        // a histogram or a range VeloCore can bucket, here only because of
         // what is under it or because of a `missing`
         run_native_bucket_agg(store, targets, query_json, name, def)
     } else if def.get("ip_range").is_some() {

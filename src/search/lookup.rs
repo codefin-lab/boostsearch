@@ -1240,12 +1240,12 @@ fn percolate_documents(store: &Store, spec: &Value) -> std::result::Result<Vec<V
     }
     let g = st.read();
     let searcher = g.reader.searcher();
-    let probe = boostcore::query::TermQuery::new(
-        boostcore::Term::from_field_text(g.fields.id, id),
-        boostcore::schema::IndexRecordOption::Basic,
+    let probe = velocore::query::TermQuery::new(
+        velocore::Term::from_field_text(g.fields.id, id),
+        velocore::schema::IndexRecordOption::Basic,
     );
     let found = searcher
-        .search(&probe, &boostcore::collector::TopDocs::with_limit(1).order_by_score())
+        .search(&probe, &velocore::collector::TopDocs::with_limit(1).order_by_score())
         .ok()
         .and_then(|hits| hits.first().map(|(_, addr)| *addr))
         .filter(|_| crate::security::doc_visible(store, &g, id))

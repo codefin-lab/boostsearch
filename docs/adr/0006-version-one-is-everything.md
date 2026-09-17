@@ -2,13 +2,13 @@
 
 The alternative was a staged release: a single-node engine first, a cluster
 after it, the plugin surfaces after that. We are not doing it that way. Version
-one of BoostSearch answers everything OpenSearch answers -- the search API, the
+one of VeloSearch answers everything OpenSearch answers -- the search API, the
 analysers, Painless, ingest, security including document- and field-level, a
 real cluster, index management, vector search and SQL/PPL -- and beats it on
 every dimension of the bench matrix.
 
 The reason is what the product is for. A team replaces OpenSearch with
-BoostSearch, or it does not; a replacement missing a surface they use is not a
+VeloSearch, or it does not; a replacement missing a surface they use is not a
 replacement, and finding that out after the migration is worse than never
 starting. Shipping "compatible except for..." teaches people to distrust the
 word, and the word is the whole product.

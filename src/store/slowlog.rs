@@ -6,7 +6,7 @@
 //! were none. An operation that took longer than a threshold is written here,
 //! in the text OpenSearch writes -- to the node's log output, and to
 //! `<cluster>_index_search_slowlog.log` and `<cluster>_index_indexing_slowlog.log`
-//! when the node has a logs directory (`path.logs`, or `BOOSTSEARCH_LOGS`).
+//! when the node has a logs directory (`path.logs`, or `VELOSEARCH_LOGS`).
 
 use std::io::Write;
 
@@ -187,7 +187,7 @@ fn logs_dir() -> Option<&'static std::path::Path> {
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let named =
-            std::env::var("BOOSTSEARCH_LOGS").ok().filter(|d| !d.is_empty()).or_else(|| {
+            std::env::var("VELOSEARCH_LOGS").ok().filter(|d| !d.is_empty()).or_else(|| {
                 crate::tls::node_setting(&crate::tls::node_settings(), "path.logs")
                     .filter(|d| !d.is_empty())
             })?;

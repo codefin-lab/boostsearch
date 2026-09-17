@@ -1,6 +1,6 @@
 # Security is in the query path, not in front of it
 
-BoostSearch carries the whole of what OpenSearch's security plugin does:
+VeloSearch carries the whole of what OpenSearch's security plugin does:
 TLS, users and roles, API keys, SAML, OIDC, LDAP, an audit log, and -- the part
 that decides the architecture -- document-level and field-level security.
 

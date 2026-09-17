@@ -1,7 +1,7 @@
 //! Cutting a word down to the part that carries its meaning.
 //!
 //! OpenSearch names one analyzer per language, and each names a stemmer.
-//! BoostCore ships Snowball for eighteen languages; the rest are the light
+//! VeloCore ships Snowball for eighteen languages; the rest are the light
 //! stemmers Lucene wrote, which strip a short list of endings rather than run
 //! a full algorithm. They are reimplemented here from the rules those
 //! stemmers apply (Apache-2.0, the Apache Software Foundation), and the tests
@@ -848,7 +848,7 @@ pub(crate) fn greek_lowercase(word: &str) -> String {
 }
 
 /// Armenian, Basque, Catalan, Irish, Lithuanian and Estonian have a Snowball
-/// algorithm BoostCore does not carry. What is applied instead is the ending
+/// algorithm VeloCore does not carry. What is applied instead is the ending
 /// each marks its plural and its cases with: enough for a query and the word
 /// it was written as to meet, and short of the full algorithm.
 pub(crate) fn armenian(word: &str) -> String {

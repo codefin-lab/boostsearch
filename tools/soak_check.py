@@ -47,13 +47,13 @@ import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PORT = int(os.environ.get("BOOST_SOAK_PORT", "9378"))
-TRANSPORT = int(os.environ.get("BOOST_SOAK_TRANSPORT", "9478"))
+PORT = int(os.environ.get("VELO_SOAK_PORT", "9378"))
+TRANSPORT = int(os.environ.get("VELO_SOAK_TRANSPORT", "9478"))
 URL = f"http://127.0.0.1:{PORT}"
 INDEX = "soak"
 # the index that does not change, so that a slower search means a slower node
 CONTROL = "soak-control"
-CONTROL_DOCS = int(os.environ.get("BOOST_SOAK_CONTROL_DOCS", "20000"))
+CONTROL_DOCS = int(os.environ.get("VELO_SOAK_CONTROL_DOCS", "20000"))
 
 
 def call(path, method="GET", body=None, ndjson=None, timeout=30):
@@ -81,13 +81,13 @@ def call(path, method="GET", body=None, ndjson=None, timeout=30):
 
 class Node:
     def __init__(self, binary, data, log):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("BOOSTSEARCH_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VELOSEARCH_")}
         env.update({
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{PORT}",
-            "BOOSTSEARCH_DATA": str(data),
-            "BOOSTSEARCH_TRANSPORT_PORT": str(TRANSPORT),
-            "BOOSTSEARCH_TRANSPORT_INSECURE": "true",
-            "BOOSTSEARCH_PLUGINS_SECURITY_DISABLED": "true",
+            "VELOSEARCH_ADDR": f"127.0.0.1:{PORT}",
+            "VELOSEARCH_DATA": str(data),
+            "VELOSEARCH_TRANSPORT_PORT": str(TRANSPORT),
+            "VELOSEARCH_TRANSPORT_INSECURE": "true",
+            "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true",
         })
         self.log = open(log, "ab")
         self.proc = subprocess.Popen([binary], env=env, stdout=self.log, stderr=subprocess.STDOUT)
@@ -249,7 +249,7 @@ def quarters(samples, t0_len):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target/release/boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target/release/velosearch"))
     ap.add_argument("--minutes", type=float, default=30.0)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--keep", action="store_true")

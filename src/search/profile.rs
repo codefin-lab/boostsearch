@@ -104,13 +104,13 @@ struct QueryCost {
 /// Run a query the way a collector runs it, timing each part: the weight,
 /// a scorer per segment, stepping through the documents it matches and, when
 /// the search scores, scoring them.
-fn time_query(searcher: &Searcher, q: &dyn boostcore::query::Query, scoring: bool) -> QueryCost {
-    use boostcore::DocSet;
+fn time_query(searcher: &Searcher, q: &dyn velocore::query::Query, scoring: bool) -> QueryCost {
+    use velocore::DocSet;
     let mut cost = QueryCost::default();
     let t = Instant::now();
     let enable = match scoring {
-        true => boostcore::query::EnableScoring::enabled_from_searcher(searcher),
-        false => boostcore::query::EnableScoring::disabled_from_searcher(searcher),
+        true => velocore::query::EnableScoring::enabled_from_searcher(searcher),
+        false => velocore::query::EnableScoring::disabled_from_searcher(searcher),
     };
     let Ok(weight) = q.weight(enable) else { return cost };
     cost.create_weight.add(t.elapsed().as_nanos() as u64, 1);
@@ -124,7 +124,7 @@ fn time_query(searcher: &Searcher, q: &dyn boostcore::query::Query, scoring: boo
         let mut t = Instant::now();
         loop {
             let doc = scorer.doc();
-            if doc == boostcore::TERMINATED {
+            if doc == velocore::TERMINATED {
                 break;
             }
             if scoring && alive.map(|a| a.is_alive(doc)).unwrap_or(true) {
@@ -508,14 +508,14 @@ pub(crate) fn search_profile(
 pub(crate) fn matched_by_shard(
     searcher: &Searcher,
     g: &IdxState,
-    q: &dyn boostcore::query::Query,
+    q: &dyn velocore::query::Query,
 ) -> Vec<u64> {
     // enough documents to say how the matches fall, without reading the id
     // of every one of a very large match
     const SAMPLE: usize = 200_000;
     let shards = g.shard_count().max(1) as usize;
     let mut out = vec![0u64; shards];
-    let Ok(found) = searcher.search(q, &boostcore::collector::DocSetCollector) else {
+    let Ok(found) = searcher.search(q, &velocore::collector::DocSetCollector) else {
         return out;
     };
     let mut id = String::new();
@@ -575,17 +575,17 @@ impl AggCost {
 /// the scan, the harvest, and the merge.
 fn timed_aggs(
     searcher: &Searcher,
-    weight: &dyn boostcore::query::Weight,
+    weight: &dyn velocore::query::Weight,
     aggs: Aggregations,
     ctx: &Ctx,
-) -> (boostcore::Result<IntermediateAggregationResults>, AggCost) {
-    use boostcore::collector::{Collector, SegmentCollector};
+) -> (velocore::Result<IntermediateAggregationResults>, AggCost) {
+    use velocore::collector::{Collector, SegmentCollector};
     let mut cost = AggCost::default();
     let t = Instant::now();
     let ctxp = AggContextParams::new(Default::default(), ctx.index.tokenizers().clone());
     let collector = DistributedAggregationCollector::from_aggs(aggs, ctxp);
     cost.initialize.add((t.elapsed().as_nanos() as u64).max(1), 1);
-    let mut run = || -> boostcore::Result<IntermediateAggregationResults> {
+    let mut run = || -> velocore::Result<IntermediateAggregationResults> {
         let mut fruits = Vec::new();
         for (ord, reader) in searcher.segment_readers().iter().enumerate() {
             let segment = Instant::now();
@@ -626,12 +626,12 @@ fn timed_aggs(
 /// entries, and the time the request's own run took.
 pub(crate) fn profiled_agg_search(
     searcher: &Searcher,
-    q: &dyn boostcore::query::Query,
+    q: &dyn velocore::query::Query,
     aggs: Aggregations,
     ctx: &Ctx,
     request: Option<&Value>,
-) -> (boostcore::Result<IntermediateAggregationResults>, Vec<Value>, u64) {
-    let weight = match q.weight(boostcore::query::EnableScoring::disabled_from_searcher(searcher)) {
+) -> (velocore::Result<IntermediateAggregationResults>, Vec<Value>, u64) {
+    let weight = match q.weight(velocore::query::EnableScoring::disabled_from_searcher(searcher)) {
         Ok(w) => w,
         Err(e) => return (Err(e), Vec::new(), 0),
     };
@@ -664,10 +664,10 @@ pub(crate) fn profiled_agg_search(
 /// One aggregation's profile entry, its sub-aggregations as its children.
 fn agg_entry(
     searcher: &Searcher,
-    weight: &dyn boostcore::query::Weight,
+    weight: &dyn velocore::query::Weight,
     ctx: &Ctx,
     (name, top): (&str, bool),
-    agg: &boostcore::aggregation::agg_req::Aggregation,
+    agg: &velocore::aggregation::agg_req::Aggregation,
     def: &Value,
 ) -> Value {
     let mut alone = Aggregations::default();
@@ -968,7 +968,7 @@ pub(crate) fn apply_typed_keys_suggest(out: &mut Value, request: &Value) {
 
 /// The profile entry for an aggregation this engine computed itself.
 ///
-/// One of those never reaches BoostCore's collectors, so its time is the time
+/// One of those never reaches VeloCore's collectors, so its time is the time
 /// the engine spent working it out, which `nanos` carries, and it is written
 /// as the aggregator OpenSearch would have used, with its sub-aggregations
 /// under it. Their time is part of their parent's: they are worked out

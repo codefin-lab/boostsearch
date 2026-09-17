@@ -12,7 +12,7 @@ name: image
 # repository, and only `main` or a `v*` tag; the service account it becomes
 # may write to this one Artifact Registry repository and nothing else.
 #
-#   asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch:<sha>
+#   asia-southeast1-docker.pkg.dev/codefin-lab/velosearch/velosearch:<sha>
 #   ...:main and ...:latest   the newest green commit on main
 #   ...:<version>             a release tag, `v1.2.3` pushed as `1.2.3`
 
@@ -35,9 +35,9 @@ permissions:
 
 env:
   REGISTRY: asia-southeast1-docker.pkg.dev
-  IMAGE: asia-southeast1-docker.pkg.dev/codefin-lab/boostsearch/boostsearch
-  WORKLOAD_IDENTITY_PROVIDER: projects/591010045058/locations/global/workloadIdentityPools/github-boostsearch/providers/github
-  SERVICE_ACCOUNT: gh-boostsearch-image@codefin-lab.iam.gserviceaccount.com
+  IMAGE: asia-southeast1-docker.pkg.dev/codefin-lab/velosearch/velosearch
+  WORKLOAD_IDENTITY_PROVIDER: projects/591010045058/locations/global/workloadIdentityPools/github-velosearch/providers/github
+  SERVICE_ACCOUNT: gh-velosearch-image@codefin-lab.iam.gserviceaccount.com
 
 concurrency:
   group: image-${{ github.event.workflow_run.head_sha || github.sha }}
@@ -92,7 +92,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: boostsearch:candidate
+          tags: velosearch:candidate
           cache-from: type=gha,scope=image-amd64
           cache-to: type=gha,scope=image-amd64,mode=max
           labels: |
@@ -105,9 +105,9 @@ jobs:
       - name: The image answers
         run: |
           docker run -d --name candidate -p 9200:9200 \
-            -e BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true \
-            -e BOOSTSEARCH_TRANSPORT_INSECURE=true \
-            boostsearch:candidate
+            -e VELOSEARCH_PLUGINS_SECURITY_DISABLED=true \
+            -e VELOSEARCH_TRANSPORT_INSECURE=true \
+            velosearch:candidate
           for i in $(seq 60); do
             curl -sf localhost:9200/ >/dev/null && break
             sleep 1
@@ -129,7 +129,7 @@ jobs:
       - name: Push
         run: |
           for tag in $(echo "${{ steps.tags.outputs.tags }}" | tr ',' ' '); do
-            docker tag boostsearch:candidate "$tag"
+            docker tag velosearch:candidate "$tag"
             docker push "$tag"
           done
 

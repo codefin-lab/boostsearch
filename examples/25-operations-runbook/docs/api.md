@@ -88,7 +88,7 @@ from `run.sh`; if the two disagree, `run.sh` is right.
 |  | `GET` | `/orders/_stats/segments` |  |
 | and the node as a whole -- _nodes/stats/indices, and the memory it holds | `GET` | `/_nodes/stats/indices?filter_path=nodes.*.name,nodes.*.indices.docs,nodes.*.indices.store` |  |
 |  | `GET` | `/_nodes/stats/indices` |  |
-|  | `GET` | `/_boostsearch/memory?filter_path=allocator,indices` |  |
+|  | `GET` | `/_velosearch/memory?filter_path=allocator,indices` |  |
 | is the cluster manager keeping up? -- _cluster/pending_tasks | `GET` | `/_cluster/pending_tasks` |  |
 | what is running right now? -- _tasks | `GET` | `/_tasks?detailed=true&filter_path=nodes.*.tasks.*.action,nodes.*.tasks.*.cancellable` |  |
 | what this example leaves behind, checked rather than assumed | `GET` | `/_cat/indices/orders,audit?v&h=health,index,pri,rep,docs.count&s=index` |  |
@@ -116,7 +116,7 @@ Path parameters and query strings removed, deduplicated:
 - `/<var>/_settings`
 - `/<var>/_settings/<var>`
 - `/<var>/_stats/<var>`
-- `/_boostsearch/memory`
+- `/_velosearch/memory`
 - `/_cat/allocation`
 - `/_cat/indices`
 - `/_cat/indices/<var>`

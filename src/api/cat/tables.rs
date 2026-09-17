@@ -983,7 +983,7 @@ pub async fn cat_health(State(store): State<Store>, Query(p): Query<Params>) -> 
     let mut row: Vec<(&str, String)> = vec![
         ("epoch", now.to_string()),
         ("timestamp", clock),
-        ("cluster", text("cluster_name", "boostsearch")),
+        ("cluster", text("cluster_name", "velosearch")),
         ("status", text("status", "red")),
         ("node.total", text("number_of_nodes", "0")),
         ("node.data", text("number_of_data_nodes", "0")),

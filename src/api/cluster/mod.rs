@@ -28,7 +28,7 @@ pub async fn cluster_stats(State(store): State<Store>, Query(p): Query<Params>) 
         &p,
         json!({
             "_nodes": {"total": 1, "successful": 1, "failed": 0},
-            "cluster_name": "boostsearch",
+            "cluster_name": "velosearch",
             "cluster_uuid": "_na_",
             "timestamp": 1_577_836_800_000u64,
             "status": if replicated { "yellow" } else { "green" },

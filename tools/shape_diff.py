@@ -12,7 +12,7 @@ import json, sys, urllib.request, urllib.error
 
 import os
 A = ("OpenSearch", os.environ.get("DIFF_A", "http://127.0.0.1:9299"))
-B = ("BoostSearch", os.environ.get("DIFF_B", "http://127.0.0.1:9200"))
+B = ("VeloSearch", os.environ.get("DIFF_B", "http://127.0.0.1:9200"))
 INDEX = "shape"
 
 MAPPING = {

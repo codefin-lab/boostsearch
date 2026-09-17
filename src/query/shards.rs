@@ -1,17 +1,17 @@
 //! The documents of some of an index's shards.
 //!
-//! One BoostCore index holds every shard of an OpenSearch index, so a search
+//! One VeloCore index holds every shard of an OpenSearch index, so a search
 //! narrowed by `routing` or `preference=_shards:` cannot be sent to fewer
 //! indices: it is narrowed to the documents those shards hold instead. Where
 //! a document lives is worked out as a write placed it -- from the routing
 //! kept in the document, or from its id where it has none.
 
 use super::*;
-use boostcore::query::{BitSetDocSet, ConstScorer, Explanation, Scorer};
-use boostcore::{DocId, Score, SegmentReader};
+use velocore::query::{BitSetDocSet, ConstScorer, Explanation, Scorer};
+use velocore::{DocId, Score, SegmentReader};
 
 /// How an index folds a routing value into a shard, and which shards are
-/// wanted. Written into the request as `_bs_on_shards` by the search that
+/// wanted. Written into the request as `_vs_on_shards` by the search that
 /// narrows, and read back here.
 #[derive(Clone, Debug)]
 pub struct OnShards {
@@ -27,7 +27,7 @@ impl OnShards {
             .get("shards")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
-            .ok_or_else(|| anyhow!("[_bs_on_shards] needs [shards]"))?;
+            .ok_or_else(|| anyhow!("[_vs_on_shards] needs [shards]"))?;
         Ok(OnShards {
             shards,
             of: body.get("of").and_then(|v| v.as_u64()).unwrap_or(1).max(1),
@@ -51,8 +51,8 @@ impl OnShards {
         }
     }
 
-    fn matching(&self, reader: &SegmentReader) -> boostcore::Result<boostcore_common::BitSet> {
-        let mut bits = boostcore_common::BitSet::with_max_value(reader.max_doc());
+    fn matching(&self, reader: &SegmentReader) -> velocore::Result<velocore_common::BitSet> {
+        let mut bits = velocore_common::BitSet::with_max_value(reader.max_doc());
         let ff = reader.fast_fields();
         let Ok(Some(ids)) = ff.str("_id") else { return Ok(bits) };
         let column = format!("{}.{}", crate::store::RAW, crate::store::ROUTING_KEY);
@@ -83,18 +83,18 @@ impl OnShards {
 }
 
 impl Query for OnShards {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         Ok(Box::new(self.clone()))
     }
 }
 
 impl Weight for OnShards {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> boostcore::Result<Box<dyn Scorer>> {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> velocore::Result<Box<dyn Scorer>> {
         let bits = self.matching(reader)?;
         Ok(Box::new(ConstScorer::new(BitSetDocSet::from(bits), boost)))
     }
 
-    fn explain(&self, reader: &SegmentReader, doc: DocId) -> boostcore::Result<Explanation> {
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> velocore::Result<Explanation> {
         if self.matching(reader)?.contains(doc) {
             Ok(Explanation::new("OnShards", 0.0))
         } else {
@@ -102,7 +102,7 @@ impl Weight for OnShards {
         }
     }
 
-    fn count(&self, reader: &SegmentReader) -> boostcore::Result<u32> {
+    fn count(&self, reader: &SegmentReader) -> velocore::Result<u32> {
         Ok(self.matching(reader)?.len() as u32)
     }
 }

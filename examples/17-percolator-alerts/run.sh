@@ -10,7 +10,7 @@ EVENTS=events
 # sets BODY and CODE, and prints the body
 answer() {
   local out
-  out=$(curl -sS ${AUTH:+-u "$AUTH"} -X "$1" "$BS$2" -H 'Content-Type: application/json' \
+  out=$(curl -sS ${AUTH:+-u "$AUTH"} -X "$1" "$VS$2" -H 'Content-Type: application/json' \
         --data-binary "@$3" -w '\n%{http_code}')
   CODE=${out##*$'\n'}
   BODY=${out%$'\n'*}
@@ -22,7 +22,7 @@ answer() {
 # score(id), slots(id), hl(id) read one hit.
 expect_that() {
   local what=$1 m=$2 p=$3 f=$4 expr=$5 got
-  got=$("${CURL[@]}" -X "$m" "$BS$p" -H 'Content-Type: application/json' --data-binary "@$f" 2>/dev/null \
+  got=$("${CURL[@]}" -X "$m" "$VS$p" -H 'Content-Type: application/json' --data-binary "@$f" 2>/dev/null \
     | python3 -c 'import json, sys
 try:
     d = json.load(sys.stdin)

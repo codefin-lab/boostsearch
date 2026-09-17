@@ -7,7 +7,7 @@ computes. This one is about what the *cluster* does when part of it stops
 existing, and that cannot be shown against a single node. It starts three on
 ports 9340-9342, drives them, kills one, and stops them all on exit.
 
-It deliberately does not use `lib.sh` or `BS`: the whole point is having three
+It deliberately does not use `lib.sh` or `VS`: the whole point is having three
 addresses and asking each of them separately.
 
 ## What "yellow, not red" means

@@ -1,4 +1,4 @@
-//! boostsearch -- an OpenSearch-compatible search server on BoostCore.
+//! velosearch -- an OpenSearch-compatible search server on VeloCore.
 //!
 //! Conformance is driven by OpenSearch's own rest-api-spec YAML suite
 //! (see tools/yaml_runner.py). Routes not yet ported answer 501.
@@ -10,7 +10,7 @@
 // would compile every one of them a second time -- once as the library and
 // once inside this binary -- which doubles the build and reports as dead
 // everything the server does not itself reach.
-use boostsearch::{api, cluster, http_compat, ism, security, store, tls};
+use velosearch::{api, cluster, http_compat, ism, security, store, tls};
 
 use axum::Router;
 
@@ -37,13 +37,13 @@ async fn root() -> impl IntoResponse {
         "cluster_name": me.cluster_name,
         "cluster_uuid": uuid,
         "version": {
-            "distribution": "boostsearch",
+            "distribution": "velosearch",
             "number": "3.9.0",
             "build_type": "tar",
             "build_hash": "unknown",
             "build_date": "2026-01-01T00:00:00.000000Z",
             "build_snapshot": false,
-            "lucene_version": "BoostCore-0.26",
+            "lucene_version": "VeloCore-0.26",
             "minimum_wire_compatibility_version": "2.19.0",
             "minimum_index_compatibility_version": "2.0.0",
         },
@@ -56,7 +56,7 @@ async fn chaos_or_404(
     state: axum::extract::State<Store>,
     body: String,
 ) -> axum::response::Response {
-    if std::env::var("BOOSTSEARCH_CHAOS").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("VELOSEARCH_CHAOS").map(|v| v == "1").unwrap_or(false) {
         api::chaos(state, body).await
     } else {
         axum::http::StatusCode::NOT_FOUND.into_response()
@@ -113,7 +113,7 @@ fn app(store: Store) -> Router {
         .route("/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_mget", get(api::mget).post(api::mget))
         .route("/{index}/_update/{id}", post(api::update_doc))
-        .route("/_boostsearch/memory", get(api::memory_report))
+        .route("/_velosearch/memory", get(api::memory_report))
         // --- cluster ---
         .route("/_cluster/health", get(api::cluster_health))
         .route("/_cluster/health/{index}", get(api::cluster_health))
@@ -296,7 +296,7 @@ fn app(store: Store) -> Router {
         .route("/_nodes", get(api::nodes_info))
         .route("/_nodes/{*rest}", get(api::nodes_info_scoped).post(api::nodes_post))
         .route("/_cluster/reroute", post(api::reroute))
-        .route("/_boost/chaos", post(chaos_or_404))
+        .route("/_velo/chaos", post(chaos_or_404))
         .route("/_script_context", get(api::script_contexts))
         .route("/_script_language", get(api::script_languages))
         .route("/_plugins/_asynchronous_search", post(api::submit_async_search))
@@ -398,7 +398,7 @@ fn app(store: Store) -> Router {
         // A bulk request is as big as the client wants to make it. Axum
         // stops at 2 MB by default, which is smaller than any bulk helper's
         // idea of a batch; OpenSearch's own ceiling is 100 MB, so that is the
-        // one to keep. `BOOSTSEARCH_MAX_CONTENT_MB` moves it.
+        // one to keep. `VELOSEARCH_MAX_CONTENT_MB` moves it.
         .route("/_plugins/_ism/policies", get(api::ism::get_policy))
         .route(
             "/_plugins/_ism/policies/{id}",
@@ -508,7 +508,7 @@ fn app(store: Store) -> Router {
 
 /// How large a request body may be, in bytes.
 fn max_content_bytes() -> usize {
-    std::env::var("BOOSTSEARCH_MAX_CONTENT_MB")
+    std::env::var("VELOSEARCH_MAX_CONTENT_MB")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|mb| *mb > 0)
@@ -522,19 +522,19 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
     // the node's uptime counts from here
     api::sysinfo::uptime_millis();
-    let addr = std::env::var("BOOSTSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
-    // BOOSTSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
+    let addr = std::env::var("VELOSEARCH_ADDR").unwrap_or_else(|_| "127.0.0.1:9200".into());
+    // VELOSEARCH_DATA=<dir> keeps indices on disk (mmapped, and they survive a
     // restart); unset keeps everything in RAM, which is what the test suite wants.
     // who this node is: the id kept in the data directory, the name, roles
     // and addresses from the settings -- fixed before anything reads it
     let node_settings = tls::node_settings();
-    let data_dir = std::env::var("BOOSTSEARCH_DATA")
+    let data_dir = std::env::var("VELOSEARCH_DATA")
         .ok()
         .filter(|d| !d.is_empty())
         .map(std::path::PathBuf::from);
     let identity = cluster::NodeIdentity::load(&node_settings, data_dir.as_deref(), &addr);
     cluster::set_identity(identity.clone());
-    let store = match std::env::var("BOOSTSEARCH_DATA") {
+    let store = match std::env::var("VELOSEARCH_DATA") {
         Ok(dir) if !dir.is_empty() => Store::on_disk(&dir)?,
         _ => Store::new(),
     };
@@ -548,15 +548,15 @@ async fn main() -> anyhow::Result<()> {
     // binds every interface, and without this check it would answer anyone
     let loopback =
         addr.starts_with("127.") || addr.starts_with("localhost") || addr.starts_with("[::1]");
-    let said_so = std::env::var("BOOSTSEARCH_PLUGINS_SECURITY_DISABLED").is_ok()
-        || std::env::var("BOOSTSEARCH_DISABLED").is_ok()
+    let said_so = std::env::var("VELOSEARCH_PLUGINS_SECURITY_DISABLED").is_ok()
+        || std::env::var("VELOSEARCH_DISABLED").is_ok()
         || std::env::var("DISABLE_SECURITY_PLUGIN").is_ok()
         || tls::node_setting(&tls::node_settings(), "plugins.security.disabled").is_some();
     if !store.security.enabled && !loopback && !said_so {
         eprintln!(
             "refusing to listen on {addr} with security off. Either configure security \
              (plugins.security.disabled: false and a config directory), or say this is \
-             meant: BOOSTSEARCH_PLUGINS_SECURITY_DISABLED=true"
+             meant: VELOSEARCH_PLUGINS_SECURITY_DISABLED=true"
         );
         std::process::exit(2);
     }
@@ -600,7 +600,7 @@ async fn main() -> anyhow::Result<()> {
     let transport_tls = match cluster::tcp::TransportTls::read(&node_settings) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("boostsearch: transport TLS is on but could not be set up: {e}");
+            eprintln!("velosearch: transport TLS is on but could not be set up: {e}");
             std::process::exit(2);
         }
     };
@@ -608,13 +608,13 @@ async fn main() -> anyhow::Result<()> {
     let transport_loopback =
         bind_host.starts_with("127.") || bind_host == "localhost" || bind_host == "[::1]";
     let transport_said_so =
-        std::env::var("BOOSTSEARCH_TRANSPORT_INSECURE").map(|v| v != "false").unwrap_or(false);
+        std::env::var("VELOSEARCH_TRANSPORT_INSECURE").map(|v| v != "false").unwrap_or(false);
     if transport_tls.is_none() && !transport_loopback && !transport_said_so {
         eprintln!(
             "refusing to listen for transport connections on {} without transport TLS. \
              Whoever reaches that port would be a node in this cluster: set \
              plugins.security.ssl.transport.enabled and the certificates beside it, or say \
-             this is meant: BOOSTSEARCH_TRANSPORT_INSECURE=true",
+             this is meant: VELOSEARCH_TRANSPORT_INSECURE=true",
             identity.transport_bind
         );
         std::process::exit(2);
@@ -626,7 +626,7 @@ async fn main() -> anyhow::Result<()> {
         let bind = identity.transport_bind.clone();
         tokio::spawn(async move {
             if let Err(e) = t.listen(&bind).await {
-                eprintln!("boostsearch: transport could not listen on {bind}: {e}");
+                eprintln!("velosearch: transport could not listen on {bind}: {e}");
             }
         });
     }
@@ -682,15 +682,15 @@ async fn main() -> anyhow::Result<()> {
         cluster::forward::install(app(store.clone()));
     }
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    // TLS is asked for in config/boostsearch.yml (`plugins.security.ssl.http.enabled`)
-    // or by BOOSTSEARCH_SSL_HTTP_ENABLED=true
+    // TLS is asked for in config/velosearch.yml (`plugins.security.ssl.http.enabled`)
+    // or by VELOSEARCH_SSL_HTTP_ENABLED=true
     let tls_settings = tls::TlsSettings::read(&node_settings);
     if tls_settings.enabled {
-        eprintln!("boostsearch listening on https://{addr}");
+        eprintln!("velosearch listening on https://{addr}");
         tls::serve_tls(listener, app(store.clone()), &tls_settings, shutdown_signal(store.clone()))
             .await?;
     } else {
-        eprintln!("boostsearch listening on {addr}");
+        eprintln!("velosearch listening on {addr}");
         axum::serve(
             http_compat::LenientListener(listener),
             app(store.clone()).into_make_service_with_connect_info::<http_compat::Peer>(),
@@ -748,7 +748,7 @@ async fn shutdown_signal(store: Store) {
         _ = term => {}
         _ = tokio::signal::ctrl_c() => {}
     }
-    eprintln!("boostsearch: stopping");
+    eprintln!("velosearch: stopping");
     if let Some(rt) = cluster::runtime() {
         let me = rt.local();
         if let Some(m) = rt.state().cluster_manager.clone()
@@ -770,7 +770,7 @@ async fn shutdown_signal(store: Store) {
             let mine = rt.state().routing.on_node(&me).filter(|c| c.primary).count();
             if mine == 0 || !elsewhere || std::time::Instant::now() >= deadline {
                 if mine > 0 && elsewhere {
-                    eprintln!("boostsearch: stopping with {mine} primaries still here");
+                    eprintln!("velosearch: stopping with {mine} primaries still here");
                 }
                 break;
             }
@@ -784,7 +784,7 @@ async fn shutdown_signal(store: Store) {
     std::thread::spawn(move || {
         std::thread::sleep(SHUTDOWN_GRACE);
         save_state(&store);
-        eprintln!("boostsearch: stopped with connections still open");
+        eprintln!("velosearch: stopped with connections still open");
         std::process::exit(0);
     });
 }

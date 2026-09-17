@@ -116,7 +116,7 @@ impl Console {
         let plugin_dirs = plugin_dirs(&home);
         let uuid = uuid_of();
         let mapping = pinned.saved_object_index.get("mappings").cloned().unwrap_or_default();
-        let anonymous_status = std::env::var("BOOSTSEARCH_CONSOLE_ANONYMOUS_STATUS")
+        let anonymous_status = std::env::var("VELOSEARCH_CONSOLE_ANONYMOUS_STATUS")
             .map(|v| v != "false")
             .unwrap_or(true);
         let sample_data: Vec<Value> = std::fs::read_to_string(pins.join("sample_data.json"))

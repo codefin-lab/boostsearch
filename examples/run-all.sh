@@ -7,10 +7,10 @@
 # node, which the others leave yellow). Each has `make serve` of its own.
 set -uo pipefail
 cd "$(dirname "$0")"
-BIN=${BIN:-../target/release/boostsearch}
+BIN=${BIN:-../target/release/velosearch}
 PORT=${PORT:-9250}
-DATA=${DATA:-/tmp/boost-examples}
-REPO=${REPO_DIR:-/tmp/boost-examples-repo}
+DATA=${DATA:-/tmp/velo-examples}
+REPO=${REPO_DIR:-/tmp/velo-examples-repo}
 
 [ -x "$BIN" ] || { echo "no binary at $BIN -- cargo build --release" >&2; exit 1; }
 
@@ -18,18 +18,18 @@ pids=$(lsof -ti tcp:$PORT -sTCP:LISTEN 2>/dev/null || true)
 [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 rm -rf "$DATA" "$REPO"; mkdir -p "$DATA" "$REPO"
 
-BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
-BOOSTSEARCH_TRANSPORT_PORT=$((PORT + 100)) \
-BOOSTSEARCH_DATA="$DATA" \
-BOOSTSEARCH_PATH_REPO="$REPO" \
-BOOSTSEARCH_ISM_INTERVAL_MS=2000 \
-BOOSTSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' \
+VELOSEARCH_ADDR=127.0.0.1:$PORT \
+VELOSEARCH_TRANSPORT_PORT=$((PORT + 100)) \
+VELOSEARCH_DATA="$DATA" \
+VELOSEARCH_PATH_REPO="$REPO" \
+VELOSEARCH_ISM_INTERVAL_MS=2000 \
+VELOSEARCH_REINDEX_ALLOWLIST='127.0.0.1:*' \
 "$BIN" > "$DATA/node.log" 2>&1 &
 NODE=$!
 trap 'kill $NODE 2>/dev/null' EXIT
 
 for _ in $(seq 60); do curl -sf "http://127.0.0.1:$PORT/" > /dev/null 2>&1 && break; sleep 0.5; done
-export BS="http://127.0.0.1:$PORT"
+export VS="http://127.0.0.1:$PORT"
 export REPO=backups
 
 ran=0; failed=0; failures=()

@@ -11,7 +11,7 @@ pub(crate) use significant::*;
 
 /// `terms` over the `_index` metadata field: one bucket per index that has hits.
 /// `terms` over an ordinary field, run here because something under it has to
-/// be: BoostCore still finds the buckets, and each one then narrows the query
+/// be: VeloCore still finds the buckets, and each one then narrows the query
 /// for the aggregations it could not parse.
 pub(crate) fn run_field_terms_agg(
     store: &Store,
@@ -25,7 +25,7 @@ pub(crate) fn run_field_terms_agg(
     let sub_aggs = def.get("aggs").or_else(|| def.get("aggregations")).cloned();
     let (peeled_subs, plain_subs) = split_peelable(&sub_aggs, store, targets);
     // an order naming a sub-aggregation that is run here cannot be asked of
-    // BoostCore, which will not have that aggregation; the buckets are put in
+    // VeloCore, which will not have that aggregation; the buckets are put in
     // order once it has answered
     let order = spec.get("order").cloned();
     let ordered_here = order
@@ -207,7 +207,7 @@ pub(crate) fn run_missing_terms_agg(
 /// A terms aggregation whose keys a script makes: over each value of a
 /// field (`_value`), or over the document itself (`doc`, `_score`).
 ///
-/// BoostCore's engine reads a field; a script has to be run here, over the
+/// VeloCore's engine reads a field; a script has to be run here, over the
 /// documents the query finds.
 pub(crate) fn run_scripted_terms_agg(
     store: &Store,

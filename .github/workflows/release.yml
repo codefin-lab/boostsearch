@@ -54,17 +54,17 @@ jobs:
       # neither can be packaged as the other.
       - name: Build
         run: |
-          cargo build --release --bin boostsearch \
+          cargo build --release --bin velosearch \
             --target ${{ matrix.target }} --target-dir target/full
-          cargo build --release --bin boostsearch --no-default-features \
+          cargo build --release --bin velosearch --no-default-features \
             --target ${{ matrix.target }} --target-dir target/light
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
           package() {
-            name="boostsearch-${version}-${{ matrix.target }}$2"
+            name="velosearch-${version}-${{ matrix.target }}$2"
             mkdir -p "dist/$name"
-            cp "target/$1/${{ matrix.target }}/release/boostsearch" "dist/$name/"
+            cp "target/$1/${{ matrix.target }}/release/velosearch" "dist/$name/"
             cp README.md LICENSE-APACHE LICENSE-MIT LICENSE-SNOWBALL "dist/$name/"
             tar -C dist -czf "dist/$name.tar.gz" "$name"
             (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")

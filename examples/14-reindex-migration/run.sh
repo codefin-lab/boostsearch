@@ -130,12 +130,12 @@ quiet PUT "/people-v2/_settings" '{ "settings": { "index.blocks.write": null } }
 req GET "/_cat/indices/people*?v&h=index,pri,rep,docs.count,store.size"
 
 step "reindexing from another cluster entirely"
-note "the source cluster's host must be in BOOSTSEARCH_REINDEX_ALLOWLIST"
+note "the source cluster's host must be in VELOSEARCH_REINDEX_ALLOWLIST"
 req POST "/_reindex?wait_for_completion=true" '{
-  "source": { "remote": { "host": "'"$BS"'" }, "index": "people-v2", "size": 100,
+  "source": { "remote": { "host": "'"$VS"'" }, "index": "people-v2", "size": 100,
               "query": { "term": { "country": "Japan" } } },
   "dest": { "index": "people-from-remote" }
-}' || note "not allowed from here -- start the node with BOOSTSEARCH_REINDEX_ALLOWLIST=127.0.0.1:*"
+}' || note "not allowed from here -- start the node with VELOSEARCH_REINDEX_ALLOWLIST=127.0.0.1:*"
 
 step "a long reindex runs as a task you can watch and cancel"
 req GET "/_tasks?actions=*reindex*&detailed=true"

@@ -1,6 +1,6 @@
 # One consistency mode ships, two are designed for
 
-BoostSearch replaces OpenSearch, so in version 1 a write is acknowledged when
+VeloSearch replaces OpenSearch, so in version 1 a write is acknowledged when
 OpenSearch would acknowledge it and a read from a replica may be behind, which
 is what the applications being moved across already expect -- and it is the
 mode that does not spend latency OpenSearch does not spend. A stronger mode,

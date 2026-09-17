@@ -1,7 +1,7 @@
 //! A phrase with room between its words, matched and scored as Lucene's
 //! `SloppyPhraseMatcher` does it.
 //!
-//! BoostCore's phrase with slop counts every document where the words fit as
+//! VeloCore's phrase with slop counts every document where the words fit as
 //! one occurrence, however many times they do and however loosely. Lucene
 //! counts each match, and weighs it by how far the words had to move to make
 //! it: a match `n` moves long adds `1 / (1 + n)`. So `notify in writing` at
@@ -28,7 +28,7 @@ impl SloppyPhrase {
 }
 
 impl Query for SloppyPhrase {
-    fn weight(&self, scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         // every word counts toward the idf, a repeated one as often as it is
         // written, which is how Lucene's phrase weight gathers them
         let similarity = match (scoring, self.terms.first()) {
@@ -66,10 +66,10 @@ struct SloppyWeight {
 impl SloppyWeight {
     fn frequencies(
         &self,
-        reader: &boostcore::SegmentReader,
-        only: Option<boostcore::DocId>,
-    ) -> boostcore::Result<Vec<(boostcore::DocId, f32)>> {
-        let mut candidates: Option<Vec<boostcore::DocId>> = None;
+        reader: &velocore::SegmentReader,
+        only: Option<velocore::DocId>,
+    ) -> velocore::Result<Vec<(velocore::DocId, f32)>> {
+        let mut candidates: Option<Vec<velocore::DocId>> = None;
         for term in &self.distinct {
             let docs = docs_of(reader, term)?;
             candidates = Some(match candidates {
@@ -103,13 +103,13 @@ impl SloppyWeight {
 impl Weight for SloppyWeight {
     fn scorer(
         &self,
-        reader: &boostcore::SegmentReader,
-        boost: boostcore::Score,
-    ) -> boostcore::Result<Box<dyn boostcore::query::Scorer>> {
+        reader: &velocore::SegmentReader,
+        boost: velocore::Score,
+    ) -> velocore::Result<Box<dyn velocore::query::Scorer>> {
         let found = self.frequencies(reader, None)?;
         let (Some(similarity), Some(first)) = (&self.similarity, self.distinct.first()) else {
             let docs = found.into_iter().map(|(doc, _)| doc).collect();
-            return Ok(Box::new(boostcore::query::ConstScorer::new(KeptDocs::new(docs), boost)));
+            return Ok(Box::new(velocore::query::ConstScorer::new(KeptDocs::new(docs), boost)));
         };
         let norms = norms_for(reader, first)?;
         let scored = found
@@ -121,11 +121,11 @@ impl Weight for SloppyWeight {
 
     fn explain(
         &self,
-        reader: &boostcore::SegmentReader,
-        doc: boostcore::DocId,
-    ) -> boostcore::Result<boostcore::query::Explanation> {
+        reader: &velocore::SegmentReader,
+        doc: velocore::DocId,
+    ) -> velocore::Result<velocore::query::Explanation> {
         let Some((_, freq)) = self.frequencies(reader, Some(doc))?.into_iter().next() else {
-            return Err(boostcore::TantivyError::InvalidArgument(
+            return Err(velocore::TantivyError::InvalidArgument(
                 "document does not match the phrase".to_string(),
             ));
         };
@@ -136,7 +136,7 @@ impl Weight for SloppyWeight {
             _ => 1.0,
         };
         let mut explanation =
-            boostcore::query::Explanation::new("weight(phrase), result of: score(freq)", score);
+            velocore::query::Explanation::new("weight(phrase), result of: score(freq)", score);
         explanation.add_const("phraseFreq, sloppy frequency of the phrase", freq);
         Ok(explanation)
     }

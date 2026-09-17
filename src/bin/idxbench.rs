@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let docs: Vec<Value> = lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
     let parse = t.elapsed();
 
-    let store = boostsearch::store::Store::new();
+    let store = velosearch::store::Store::new();
     store.create("bench", &serde_json::json!({}))?;
     let st = store.get("bench").unwrap();
 
@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
 
         let t = Instant::now();
         let d =
-            boostsearch::store::make_doc(&g.fields, &g.mapping, &id, doc.clone(), &raw, i as u64);
+            velosearch::store::make_doc(&g.fields, &g.mapping, &id, doc.clone(), &raw, i as u64);
         t_makedoc += t.elapsed();
 
         let t = Instant::now();
@@ -113,10 +113,10 @@ fn main() -> anyhow::Result<()> {
 
 // Variants of the document build, timed against each other.
 #[allow(dead_code)]
-fn variants(fields: &boostsearch::store::Fields, docs: &[Value]) {
-    use boostcore::TantivyDocument;
-    use boostcore::schema::OwnedValue;
+fn variants(fields: &velosearch::store::Fields, docs: &[Value]) {
     use std::collections::BTreeMap;
+    use velocore::TantivyDocument;
+    use velocore::schema::OwnedValue;
     let n = docs.len() as f64;
 
     let t = Instant::now();

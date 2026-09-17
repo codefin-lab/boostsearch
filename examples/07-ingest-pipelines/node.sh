@@ -5,15 +5,15 @@ set -e
 cd "$(dirname "$0")"
 [ -f .env ] && . ./.env
 PORT=${PORT:-9267}
-BIN=${BIN:-../../target/release/boostsearch}
-DATA=${DATA:-/tmp/boost-example-07-ingest-pipelines}
+BIN=${BIN:-../../target/release/velosearch}
+DATA=${DATA:-/tmp/velo-example-07-ingest-pipelines}
 
 [ -x "$BIN" ] || { echo "no binary at $BIN -- run cargo build --release in the repository root" >&2; exit 1; }
 rm -rf "$DATA"; mkdir -p "$DATA"
 
 echo "starting on http://127.0.0.1:$PORT, data in $DATA"
-BOOSTSEARCH_ADDR=127.0.0.1:$PORT \
-BOOSTSEARCH_TRANSPORT_PORT=$((PORT + 100)) \
-BOOSTSEARCH_DATA="$DATA" \
-BOOSTSEARCH_GEOIP_PATH=/tmp/geoip-db \
+VELOSEARCH_ADDR=127.0.0.1:$PORT \
+VELOSEARCH_TRANSPORT_PORT=$((PORT + 100)) \
+VELOSEARCH_DATA="$DATA" \
+VELOSEARCH_GEOIP_PATH=/tmp/geoip-db \
 exec "$BIN"

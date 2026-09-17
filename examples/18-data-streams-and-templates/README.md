@@ -60,7 +60,7 @@ else.
 The longer form, and what this example needs of the node:
 
 ```bash
-./target/release/boostsearch &
+./target/release/velosearch &
 examples/18-data-streams-and-templates/run.sh
 ```
 

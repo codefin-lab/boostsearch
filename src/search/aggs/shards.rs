@@ -1,6 +1,6 @@
 //! The documents of a search the way OpenSearch's shards see them.
 //!
-//! An index here is one BoostCore index whatever `number_of_shards` says; a
+//! An index here is one VeloCore index whatever `number_of_shards` says; a
 //! shard is only where a document's routing lands it. Most aggregations do not
 //! care, but some answer differently depending on which documents a shard held
 //! and in which order it read them: a terms aggregation cuts each shard's list
@@ -62,12 +62,12 @@ pub(crate) fn shard_docs(
             .map_err(|e| err(StatusCode::BAD_REQUEST, "parsing_exception", e.to_string()))?;
         let columns: Vec<String> = fields.iter().map(|f| ctx.column_name(f, false)).collect();
         let searcher = g.reader.searcher();
-        let addrs = searcher.search(&q, &boostcore::collector::DocSetCollector).map_err(|e| {
+        let addrs = searcher.search(&q, &velocore::collector::DocSetCollector).map_err(|e| {
             err(StatusCode::BAD_REQUEST, "search_phase_execution_exception", e.to_string())
         })?;
         struct Segment {
-            ids: Option<boostcore::columnar::StrColumn>,
-            seq: Option<boostcore::columnar::Column<u64>>,
+            ids: Option<velocore::columnar::StrColumn>,
+            seq: Option<velocore::columnar::Column<u64>>,
             values: Vec<SortColumns>,
         }
         let segments: Vec<Segment> = searcher
@@ -111,7 +111,7 @@ pub(crate) fn shard_docs(
 
 impl SortColumns {
     /// Every value a document holds in this column, numbers or text.
-    fn held_values(&self, doc: boostcore::DocId) -> Vec<Held> {
+    fn held_values(&self, doc: velocore::DocId) -> Vec<Held> {
         let numbers = self.numeric_values(doc);
         if !numbers.is_empty() {
             return numbers.into_iter().map(Held::Number).collect();
@@ -196,7 +196,7 @@ impl KeyOf {
 /// adds up what the shards kept, so a count can come out short, and the answer
 /// says by how much it may be: `doc_count_error_upper_bound`, overall and with
 /// `show_term_doc_count_error` for each bucket. One shard has nothing to merge,
-/// and its bound is 0. BoostCore counts over segments rather than shards, so it
+/// and its bound is 0. VeloCore counts over segments rather than shards, so it
 /// reported a bound of 146 for a single-shard index where the reference
 /// reports 0, and over three shards counts that no shard had cut. The shards
 /// are read here, each cut the way the reference cuts it, and the counts, the

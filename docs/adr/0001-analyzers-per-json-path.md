@@ -1,8 +1,8 @@
-# An analyzer belongs to a path, so BoostCore learns to pick one per path
+# An analyzer belongs to a path, so VeloCore learns to pick one per path
 
-Every document here lives in one JSON field, and BoostCore takes one analyzer
+Every document here lives in one JSON field, and VeloCore takes one analyzer
 per schema field -- so a mapping that gives `title` the `english` analyzer and
-`name_th` a Thai one has nowhere to say so. We are changing BoostCore instead
+`name_th` a Thai one has nowhere to say so. We are changing VeloCore instead
 of working around it: `index_json_value` takes a resolver from path to
 analyzer rather than a single analyzer, which is what Lucene's
 `PerFieldAnalyzerWrapper` does and what the fork exists for.
@@ -26,5 +26,5 @@ would also carry its own columns.
 This is in the write path, so it is the decision that would be most expensive
 to revisit: changing it later means reindexing. It also means the analyzer
 registry has to be reachable from the segment writer, which is a small amount
-of plumbing through BoostCore that upstream does not have and that a future
+of plumbing through VeloCore that upstream does not have and that a future
 rebase will have to re-apply.

@@ -16,8 +16,8 @@ import sys
 import time
 import urllib.request
 
-NODE = os.environ.get("BOOST_URL", "http://127.0.0.1:9213")
-DIMENSIONS = int(os.environ.get("BOOST_KNN_DIMS", "64"))
+NODE = os.environ.get("VELO_URL", "http://127.0.0.1:9213")
+DIMENSIONS = int(os.environ.get("VELO_KNN_DIMS", "64"))
 K = 10
 QUERIES = 30
 

@@ -47,8 +47,8 @@ make run        # the example, in another terminal
 The longer form, and what this example needs of the node:
 
 ```bash
-./target/release/boostsearch &
-BS=http://127.0.0.1:9200 examples/26-tenants-by-routing/run.sh
+./target/release/velosearch &
+VS=http://127.0.0.1:9200 examples/26-tenants-by-routing/run.sh
 ```
 
 Nothing beyond a plain node.

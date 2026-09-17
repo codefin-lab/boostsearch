@@ -1,4 +1,4 @@
-# Production Readiness Review — BoostSearch
+# Production Readiness Review — VeloSearch
 
 - วันที่รีวิว: 7 กันยายน 2026 (Asia/Bangkok)
 - สถานะ: **ยังไม่พร้อมใช้ใน production ที่ต้องรับประกันความถูกต้องและความคงทนของข้อมูล**

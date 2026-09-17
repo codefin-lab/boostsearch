@@ -42,7 +42,7 @@ make run        # the example, in another terminal
 The longer form, and what this example needs of the node:
 
 ```bash
-./target/release/boostsearch &
+./target/release/velosearch &
 examples/15-deep-pagination/run.sh
 ```
 

@@ -7,8 +7,8 @@ use super::*;
 /// A bare `2024-08-12` is a date to OpenSearch but not to RFC 3339, and a
 /// field indexed as text rather than as a date has no column for a range or an
 /// aggregation to read.
-pub fn parse_date_lenient(s: &str) -> Option<boostcore::time::OffsetDateTime> {
-    use boostcore::time::{Date, Month, OffsetDateTime, Time};
+pub fn parse_date_lenient(s: &str) -> Option<velocore::time::OffsetDateTime> {
+    use velocore::time::{Date, Month, OffsetDateTime, Time};
     if let Some(dt) = crate::query::parse_datetime(s) {
         return Some(dt.into_utc());
     }
@@ -80,7 +80,7 @@ pub fn format_millis(ms: i64, format: &str) -> Option<String> {
 /// The same, written in a zone rather than in UTC.
 pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
     if zone_ms != 0 {
-        let local = boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
+        let local = velocore::time::OffsetDateTime::from_unix_timestamp_nanos(
             (ms + zone_ms) as i128 * 1_000_000,
         )
         .ok()?;
@@ -104,7 +104,7 @@ pub fn format_millis_at(ms: i64, format: &str, zone_ms: i64) -> Option<String> {
     format_millis_utc(ms, format)
 }
 
-pub fn format_with_pattern(d: boostcore::time::OffsetDateTime, pattern: &str) -> String {
+pub fn format_with_pattern(d: velocore::time::OffsetDateTime, pattern: &str) -> String {
     let mut out = String::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
@@ -191,8 +191,8 @@ fn split_one(s: &str) -> (&str, &str) {
     s.split_at(n)
 }
 
-pub(crate) fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTime, Option<char>)> {
-    use boostcore::time::{Duration, OffsetDateTime};
+pub(crate) fn parse_date_math(s: &str) -> Option<(velocore::time::OffsetDateTime, Option<char>)> {
+    use velocore::time::{Duration, OffsetDateTime};
     let (anchor, ops) = match s.split_once("||") {
         Some((a, o)) => (parse_date_lenient(a)?, o),
         None => (OffsetDateTime::now_utc(), s.strip_prefix("now")?),
@@ -237,10 +237,10 @@ pub(crate) fn parse_date_math(s: &str) -> Option<(boostcore::time::OffsetDateTim
 }
 
 pub(crate) fn advance_unit(
-    dt: boostcore::time::OffsetDateTime,
+    dt: velocore::time::OffsetDateTime,
     unit: char,
-) -> Option<boostcore::time::OffsetDateTime> {
-    use boostcore::time::Duration;
+) -> Option<velocore::time::OffsetDateTime> {
+    use velocore::time::Duration;
     Some(match unit {
         'y' => shift_months(dt, 12)?,
         'M' => shift_months(dt, 1)?,
@@ -254,10 +254,10 @@ pub(crate) fn advance_unit(
 }
 
 pub(crate) fn round_down(
-    dt: boostcore::time::OffsetDateTime,
+    dt: velocore::time::OffsetDateTime,
     unit: &str,
-) -> Option<boostcore::time::OffsetDateTime> {
-    use boostcore::time::{Date, Duration, Month, Time};
+) -> Option<velocore::time::OffsetDateTime> {
+    use velocore::time::{Date, Duration, Month, Time};
     let midnight = |d: Date| d.with_time(Time::MIDNIGHT).assume_utc();
     Some(match unit {
         "y" => midnight(Date::from_calendar_date(dt.year(), Month::January, 1).ok()?),
@@ -277,10 +277,10 @@ pub(crate) fn round_down(
 }
 
 pub(crate) fn shift_months(
-    dt: boostcore::time::OffsetDateTime,
+    dt: velocore::time::OffsetDateTime,
     n: i64,
-) -> Option<boostcore::time::OffsetDateTime> {
-    use boostcore::time::{Date, Month};
+) -> Option<velocore::time::OffsetDateTime> {
+    use velocore::time::{Date, Month};
     let total = dt.year() as i64 * 12 + (dt.month() as i64 - 1) + n;
     let (y, m) = (total.div_euclid(12) as i32, total.rem_euclid(12) as u8 + 1);
     let month = Month::try_from(m).ok()?;
@@ -322,7 +322,7 @@ pub fn date_number_bound(
         && (text.contains("||") || text.starts_with("now"))
         && let Some((dt, Some(unit))) = parse_date_math(text)
     {
-        let end = advance_unit(dt, unit)? - boostcore::time::Duration::milliseconds(1);
+        let end = advance_unit(dt, unit)? - velocore::time::Duration::milliseconds(1);
         let per: i128 = if nanos { 1 } else { 1_000_000 };
         return i64::try_from(end.unix_timestamp_nanos() / per).ok();
     }
@@ -380,21 +380,21 @@ pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Opti
         _ => 1_000_000,
     };
     let dt = match v {
-        Value::Number(n) => boostcore::time::OffsetDateTime::from_unix_timestamp_nanos(
-            (n.as_f64()? as i128) * scale,
-        )
-        .ok()?,
+        Value::Number(n) => {
+            velocore::time::OffsetDateTime::from_unix_timestamp_nanos((n.as_f64()? as i128) * scale)
+                .ok()?
+        }
         Value::String(s) => match s.parse::<f64>() {
             // a number written as text still means what the format says
             Ok(n) if format.is_some() => {
-                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale)
+                velocore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale)
                     .ok()?
             }
             // `2019` is a year before it is a count of milliseconds, so the
             // date reading is tried first and the epoch only where nothing
             // else could be read from the digits
             Ok(n) => parse_date_lenient(s).or_else(|| {
-                boostcore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
+                velocore::time::OffsetDateTime::from_unix_timestamp_nanos((n as i128) * scale).ok()
             })?,
             _ => parse_date_lenient(s)?,
         },
@@ -428,8 +428,8 @@ pub fn canonical_date_prec(v: &Value, format: Option<&str>, nanos: bool) -> Opti
 /// `dd-MM-yyyy HH:mm:ss`, with letters standing for fields and anything in
 /// quotes or outside the letters standing for itself. A named format is not
 /// a pattern and reads as nothing here.
-pub fn parse_with_pattern(s: &str, pattern: &str) -> Option<boostcore::time::OffsetDateTime> {
-    use boostcore::time::{Date, Month, OffsetDateTime, Time};
+pub fn parse_with_pattern(s: &str, pattern: &str) -> Option<velocore::time::OffsetDateTime> {
+    use velocore::time::{Date, Month, OffsetDateTime, Time};
     if !pattern.chars().any(|c| c.is_ascii_uppercase() || c == 'y' || c == 'd')
         || pattern.contains('_')
     {
@@ -565,7 +565,7 @@ pub fn parse_with_pattern(s: &str, pattern: &str) -> Option<boostcore::time::Off
         .ok()?;
     let time = Time::from_hms_nano(hour as u8, minute as u8, second as u8, nanos as u32).ok()?;
     let local = OffsetDateTime::new_utc(date, time);
-    Some(local - boostcore::time::Duration::seconds(offset_secs))
+    Some(local - velocore::time::Duration::seconds(offset_secs))
 }
 
 /// Does this text look like a date to the dynamic mapping?

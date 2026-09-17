@@ -1,6 +1,6 @@
 # The cluster is written against a transport it does not own, so it can be simulated
 
-BoostSearch is becoming a real cluster: shards on different nodes, replicas,
+VeloSearch is becoming a real cluster: shards on different nodes, replicas,
 elections, and shards moving without anyone editing a file. That is the part of
 a search engine where the bugs are rare, timing-dependent and expensive, and
 OpenSearch's own tests for it are Java tests against Java classes -- 295,676

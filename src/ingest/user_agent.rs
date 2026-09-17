@@ -241,10 +241,10 @@ fn finish(key: &str, text: &str) -> Result<Arc<Parser>, IngestError> {
 
 fn config_dirs() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    if let Ok(d) = std::env::var("BOOSTSEARCH_CONFIG") {
+    if let Ok(d) = std::env::var("VELOSEARCH_CONFIG") {
         out.push(std::path::PathBuf::from(d));
     }
-    if let Ok(d) = std::env::var("BOOSTSEARCH_DATA") {
+    if let Ok(d) = std::env::var("VELOSEARCH_DATA") {
         out.push(std::path::PathBuf::from(&d).join("config"));
         out.push(std::path::PathBuf::from(&d).join("..").join("config"));
     }

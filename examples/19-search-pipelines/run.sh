@@ -42,10 +42,10 @@ refused() {
   local want=$1 m=$2 p=$3 f=${4-} out code
   out=$(mktemp)
   if [ -n "$f" ]; then
-    code=$(curl -sS ${AUTH:+-u "$AUTH"} -o "$out" -w '%{http_code}' -X "$m" "$BS$p" \
+    code=$(curl -sS ${AUTH:+-u "$AUTH"} -o "$out" -w '%{http_code}' -X "$m" "$VS$p" \
       -H 'Content-Type: application/json' --data-binary "@$f")
   else
-    code=$(curl -sS ${AUTH:+-u "$AUTH"} -o "$out" -w '%{http_code}' -X "$m" "$BS$p")
+    code=$(curl -sS ${AUTH:+-u "$AUTH"} -o "$out" -w '%{http_code}' -X "$m" "$VS$p")
   fi
   cat "$out"; echo; rm -f "$out"
   if [ "$code" = "$want" ]; then

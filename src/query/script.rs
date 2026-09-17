@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::painless::contexts::run_on_doc;
-use boostcore::query::{BitSetDocSet, ConstScorer, Explanation, Scorer};
-use boostcore::{DocId, Score, SegmentReader};
+use velocore::query::{BitSetDocSet, ConstScorer, Explanation, Scorer};
+use velocore::{DocId, Score, SegmentReader};
 
 pub struct ScriptQuery {
     pub spec: Value,
@@ -27,15 +27,15 @@ impl Clone for ScriptQuery {
 }
 
 impl Query for ScriptQuery {
-    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> boostcore::Result<Box<dyn Weight>> {
+    fn weight(&self, _enable_scoring: EnableScoring<'_>) -> velocore::Result<Box<dyn Weight>> {
         Ok(Box::new(self.clone()))
     }
 }
 
 impl ScriptQuery {
     /// Every live document of the segment the script answers true for.
-    fn matching(&self, reader: &SegmentReader) -> boostcore::Result<boostcore_common::BitSet> {
-        let mut bits = boostcore_common::BitSet::with_max_value(reader.max_doc());
+    fn matching(&self, reader: &SegmentReader) -> velocore::Result<velocore_common::BitSet> {
+        let mut bits = velocore_common::BitSet::with_max_value(reader.max_doc());
         let store = reader.get_store_reader(1)?;
         for doc in 0..reader.max_doc() {
             if reader.is_deleted(doc) {
@@ -63,12 +63,12 @@ impl ScriptQuery {
 }
 
 impl Weight for ScriptQuery {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> boostcore::Result<Box<dyn Scorer>> {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> velocore::Result<Box<dyn Scorer>> {
         let bits = self.matching(reader)?;
         Ok(Box::new(ConstScorer::new(BitSetDocSet::from(bits), boost)))
     }
 
-    fn explain(&self, reader: &SegmentReader, doc: DocId) -> boostcore::Result<Explanation> {
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> velocore::Result<Explanation> {
         let bits = self.matching(reader)?;
         if bits.contains(doc) {
             Ok(Explanation::new("ScriptQuery", 1.0))
@@ -77,7 +77,7 @@ impl Weight for ScriptQuery {
         }
     }
 
-    fn count(&self, reader: &SegmentReader) -> boostcore::Result<u32> {
+    fn count(&self, reader: &SegmentReader) -> velocore::Result<u32> {
         Ok(self.matching(reader)?.len() as u32)
     }
 }

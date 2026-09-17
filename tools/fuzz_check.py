@@ -266,13 +266,13 @@ def call(url, method, path, body, timeout):
 
 
 def start_node(binary, port, transport):
-    data = tempfile.mkdtemp(prefix="boost-fuzz-")
+    data = tempfile.mkdtemp(prefix="velo-fuzz-")
     env = dict(os.environ)
     env.update(
         {
-            "BOOSTSEARCH_ADDR": f"127.0.0.1:{port}",
-            "BOOSTSEARCH_DATA": data,
-            "BOOSTSEARCH_TRANSPORT_PORT": str(transport),
+            "VELOSEARCH_ADDR": f"127.0.0.1:{port}",
+            "VELOSEARCH_DATA": data,
+            "VELOSEARCH_TRANSPORT_PORT": str(transport),
         }
     )
     log = open(pathlib.Path(data) / "node.log", "w")
@@ -293,7 +293,7 @@ def start_node(binary, port, transport):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "boostsearch"))
+    ap.add_argument("--binary", default=str(ROOT / "target" / "release" / "velosearch"))
     ap.add_argument("--rounds", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=20.0, help="a probe that takes longer fails")

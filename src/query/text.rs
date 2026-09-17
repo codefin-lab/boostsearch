@@ -156,7 +156,7 @@ pub(crate) fn build_match(ctx: &Ctx, kind: &str, body: &Value) -> Result<Box<dyn
         // `span_near` and nowhere here, so `match_phrase: {query: "quick
         // fox", slop: 2}` found nothing in "quick brown fox".
         // With room between the words, each match counts by how far the
-        // words moved to make it, which BoostCore's phrase does not weigh.
+        // words moved to make it, which VeloCore's phrase does not weigh.
         let slop = opts.get("slop").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         if slop > 0 {
             return Ok(Box::new(crate::query::SloppyPhrase::new(terms, offsets, slop)));
@@ -402,7 +402,7 @@ pub(crate) fn build_multi_match(ctx: &Ctx, body: &Value) -> Result<Box<dyn Query
         // the best field counts whole and each other field by `tie_breaker`,
         // which was read as an allowed key and then never used
         let tie = body.get("tie_breaker").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-        Ok(Box::new(boostcore::query::DisjunctionMaxQuery::with_tie_breaker(subs, tie)))
+        Ok(Box::new(velocore::query::DisjunctionMaxQuery::with_tie_breaker(subs, tie)))
     }
 }
 

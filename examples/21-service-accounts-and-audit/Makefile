@@ -14,7 +14,7 @@ serve:
 	./node.sh
 
 run:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; BS="$${BS:-http://127.0.0.1:9281}" ./run.sh'
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; VS="$${VS:-http://127.0.0.1:9281}" ./run.sh'
 
 check:
 	@bash -n run.sh && echo "run.sh: syntax ok"
@@ -24,7 +24,7 @@ check:
 print('requests and data: valid JSON')"
 
 clean:
-	@sh -c 'if [ -f .env ]; then . ./.env; fi; bs=$${BS:-http://127.0.0.1:9281}; auth=$${AUTH:-admin:admin}; \
+	@sh -c 'if [ -f .env ]; then . ./.env; fi; bs=$${VS:-http://127.0.0.1:9281}; auth=$${AUTH:-admin:admin}; \
 for i in $(INDICES); do curl -sS -u "$$auth" -X DELETE "$$bs/$$i" > /dev/null 2>&1 || true; done; \
 for p in $(SECURITY); do curl -sS -u "$$auth" -X DELETE "$$bs/_plugins/_security/api/$$p" > /dev/null 2>&1 || true; done; \
 echo "deleted: $(INDICES) $(SECURITY)"'
