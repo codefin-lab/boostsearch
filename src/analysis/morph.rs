@@ -243,19 +243,18 @@ pub fn is_grammar(part: &str) -> bool {
         || part.starts_with("XS") // Korean: the suffixes
 }
 
-#[cfg(test)]
+// every test here reads the dictionaries, which only the `cjk` build carries
+#[cfg(all(test, feature = "cjk"))]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "cjk")]
     fn a_compound_is_offered_whole_and_in_pieces() {
         let words: Vec<String> = search_words("関西国際空港").into_iter().map(|w| w.text).collect();
         assert_eq!(words, vec!["関西", "関西国際空港", "国際", "空港"]);
     }
 
     #[test]
-    #[cfg(feature = "cjk")]
     fn a_word_that_is_not_a_compound_is_left_alone() {
         for word in ["空港", "寿司", "飲み"] {
             let read: Vec<String> = search_words(word).into_iter().map(|w| w.text).collect();
@@ -264,7 +263,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cjk")]
     fn a_sentence_keeps_its_words_in_order() {
         let read: Vec<String> =
             search_words("寿司がおいしいね").into_iter().map(|w| w.text).collect();

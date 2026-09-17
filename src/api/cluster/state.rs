@@ -205,11 +205,13 @@ pub async fn allocation_explain(
         })
         .collect();
     let held = std::collections::BTreeMap::new();
+    let home_documents = std::collections::BTreeSet::new();
     let ctx = Context {
         nodes: &live.nodes,
         indices: &live.indices,
         cluster: &cluster,
         primary_home: &home,
+        home_holds_documents: &home_documents,
         held: &held,
         now: crate::cluster::clock().wall(),
     };

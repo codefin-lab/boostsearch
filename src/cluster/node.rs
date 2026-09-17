@@ -42,21 +42,27 @@ fn setting(settings: &Value, key: &str) -> Option<String> {
 }
 
 fn list_setting(settings: &Value, key: &str) -> Vec<String> {
+    given_list_setting(settings, key).unwrap_or_default()
+}
+
+/// A list setting as written, or nothing when it is not written at all.
+///
+/// An empty list is a value of its own: `node.roles: []` is how a node is
+/// made coordinating-only, and reading it as "not set" gave that node every
+/// default role, the data role among them.
+fn given_list_setting(settings: &Value, key: &str) -> Option<Vec<String>> {
+    let split = |s: &str| -> Vec<String> {
+        s.split(',')
+            .map(|x| x.trim().trim_matches(['[', ']', '"', '\'']).trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
     match settings.pointer(&format!("/{}", key.replace('.', "/"))).or_else(|| settings.get(key)) {
         Some(Value::Array(a)) => {
-            a.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect()
+            Some(a.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
         }
-        Some(Value::String(s)) => {
-            s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
-        }
-        _ => setting(settings, key)
-            .map(|s| {
-                s.split(',')
-                    .map(|x| x.trim().trim_matches(['[', ']', '"', '\'']).to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Some(Value::String(s)) => Some(split(s)),
+        _ => crate::tls::node_setting(settings, key).map(|s| split(&s)),
     }
 }
 
@@ -83,19 +89,14 @@ impl NodeIdentity {
                 .filter(|h| !h.is_empty())
                 .unwrap_or_else(|| "velosearch".into())
         });
-        let roles = {
-            let r = list_setting(settings, "node.roles");
-            if r.is_empty() {
-                vec![
-                    "cluster_manager".into(),
-                    "data".into(),
-                    "ingest".into(),
-                    "remote_cluster_client".into(),
-                ]
-            } else {
-                r
-            }
-        };
+        let roles = given_list_setting(settings, "node.roles").unwrap_or_else(|| {
+            vec![
+                "cluster_manager".into(),
+                "data".into(),
+                "ingest".into(),
+                "remote_cluster_client".into(),
+            ]
+        });
         let mut attributes = serde_json::Map::new();
         if let Some(Value::Object(attrs)) = settings.pointer("/node/attr") {
             for (k, v) in attrs {
@@ -184,6 +185,25 @@ fn persisted_id(dir: &Path) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_role_list_is_no_roles_and_a_missing_one_is_the_defaults() {
+        let roles = |settings: Value| NodeIdentity::load(&settings, None, "127.0.0.1:9200").roles;
+        // the environment would win over the settings file here
+        if std::env::var("VELOSEARCH_NODE_ROLES").is_ok() {
+            return;
+        }
+        assert!(roles(serde_json::json!({"node": {"roles": []}})).is_empty());
+        assert!(roles(serde_json::json!({"node.roles": "[]"})).is_empty());
+        assert_eq!(
+            roles(serde_json::json!({"node.roles": ["cluster_manager"]})),
+            ["cluster_manager"]
+        );
+        assert_eq!(
+            roles(serde_json::json!({})),
+            ["cluster_manager", "data", "ingest", "remote_cluster_client"]
+        );
+    }
 
     #[test]
     fn the_id_survives_a_restart() {

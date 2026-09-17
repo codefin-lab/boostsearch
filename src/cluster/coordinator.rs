@@ -1026,11 +1026,14 @@ impl Coordinator {
         let mut held = self.held.clone();
         held.insert(me.clone(), src.held());
         held.retain(|n, _| s.nodes.contains_key(n));
+        let home_documents: BTreeSet<String> =
+            home.keys().filter(|name| src.holds_documents(name)).cloned().collect();
         let ctx = super::allocation::Context {
             nodes: &s.nodes,
             indices: &base,
             cluster: &cluster,
             primary_home: &home,
+            home_holds_documents: &home_documents,
             held: &held,
             now: self.last_wall,
         };
@@ -1124,7 +1127,7 @@ impl Coordinator {
 
     /// What of this node's store the cluster would notice changing: the
     /// indices whose primary is here or that are not placed yet, the
-    /// exclusions, the customs.
+    /// exclusions, the customs, the cluster settings.
     fn metadata_fingerprint(
         &self,
         own: &BTreeMap<String, super::state::IndexMetadata>,
@@ -1146,6 +1149,10 @@ impl Coordinator {
         super::metadata::fingerprint(&mine).hash(&mut h);
         if let Some(src) = &self.metadata {
             src.customs().to_string().hash(&mut h);
+            // the cluster settings hold the allocation filters and switches:
+            // a change to them is a reason to place the shards again, and
+            // without it an exclude waited for some unrelated publication
+            src.cluster_settings().to_string().hash(&mut h);
         }
         h.finish()
     }
@@ -2507,11 +2514,14 @@ impl Coordinator {
                     snapshot.keys().map(|n| (n.clone(), self.me.id.clone())).collect();
                 let nodes = self.committed.nodes.clone();
                 let held = self.held.clone();
+                let home_documents: BTreeSet<String> =
+                    home.keys().filter(|name| src.holds_documents(name)).cloned().collect();
                 let ctx = super::allocation::Context {
                     nodes: &nodes,
                     indices: &snapshot,
                     cluster: &cluster,
                     primary_home: &home,
+                    home_holds_documents: &home_documents,
                     held: &held,
                     now: self.last_wall,
                 };

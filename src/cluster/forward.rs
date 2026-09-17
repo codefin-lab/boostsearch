@@ -234,6 +234,43 @@ fn primary_node(state: &ClusterState, index: &str) -> Option<NodeId> {
     state.routing.primary(index, 0).and_then(|p| p.node.clone())
 }
 
+/// Whether the primary of a named index is started on a node that may hold
+/// it. A name that is not an index -- an alias, a data stream -- has nothing
+/// to wait for here.
+fn primary_placed(state: &ClusterState, index: &str) -> bool {
+    if !state.indices.contains_key(index) {
+        return true;
+    }
+    state.routing.primary(index, 0).is_some_and(|p| {
+        p.state == ShardState::Started
+            && p.node.as_ref().and_then(|n| state.nodes.get(n)).is_some_and(|n| n.is_data())
+    })
+}
+
+/// Whether the primary of an index is being made on a node right now: a new
+/// index whose primary the manager has just placed. A write sent there before
+/// the node has made it would make an index of its own under the name.
+fn primary_being_made(state: &ClusterState, index: &str) -> bool {
+    state.routing.primary(index, 0).is_some_and(|p| {
+        p.state == ShardState::Initializing
+            && p.relocating_node.is_none()
+            && p.unassigned.as_ref().is_some_and(|u| u.reason == "INDEX_CREATED")
+    })
+}
+
+/// Hold a write while the primary of its index is being made, for as long as
+/// a create waits for it.
+async fn wait_for_new_primary(store: &Store, expr: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline
+        && super::with_state(|s| {
+            s.nodes.len() > 1 && resolve(s, store, expr).iter().any(|n| primary_being_made(s, n))
+        })
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// A node holding active copies of all the indices, this node preferred,
 /// then the one holding the most of them as primaries.
 fn reader_for(state: &ClusterState, me: &NodeId, indices: &[String]) -> Option<NodeId> {
@@ -404,6 +441,9 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
     // would have a copy take writes the primary never saw.
     if matches!(target, Target::Write(None)) && super::with_state(|s| s.nodes.len() > 1) {
         return coordinate_bulk(&rt, &store, req, next).await;
+    }
+    if let Target::Write(Some(index)) = &target {
+        wait_for_new_primary(&store, index).await;
     }
     let settles = settles_metadata(req.method(), &path);
     let settles_c = settles_custom(req.method(), &path);
@@ -651,7 +691,15 @@ async fn wait_for_metadata(
                     || (!present && s.routing.indices.contains_key(&index))
             }
         });
-        if clustered { published } else { published || !store.resolve(&index).is_empty() }
+        if clustered {
+            // an index that is there is there once its primary is somewhere
+            // it may stay: a create answered while the primary was still
+            // being placed sent the next write to the manager, which is not
+            // where the index lives
+            published && (!present || super::with_state(|s| primary_placed(s, &index)))
+        } else {
+            published || !store.resolve(&index).is_empty()
+        }
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while known(store) != present && std::time::Instant::now() < deadline {
@@ -1106,6 +1154,10 @@ async fn coordinate_bulk(
     // an index a write is about to make is not in the cluster's metadata yet;
     // the answer waits until this node knows it, the way it does for a create
     let mut made: Vec<String> = Vec::new();
+    let named: std::collections::BTreeSet<String> = ops.iter().map(|op| op.2.clone()).collect();
+    for index in &named {
+        wait_for_new_primary(store, index).await;
+    }
     for (action_line, doc_line, index) in ops {
         // an alias or a data stream names an index; an unknown name is the
         // manager's to create
@@ -1224,7 +1276,10 @@ async fn wait_for_made(store: &Store, made: &[String], response: Response) -> Re
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let known = super::with_state(|s| {
-            made.iter().all(|n| s.indices.contains_key(n) || !resolve(s, store, n).is_empty())
+            made.iter().all(|n| {
+                (s.indices.contains_key(n) || !resolve(s, store, n).is_empty())
+                    && (s.nodes.len() <= 1 || primary_placed(s, n))
+            })
         });
         if known || std::time::Instant::now() >= deadline {
             return response;
@@ -1255,16 +1310,36 @@ async fn run_local_bulk(
 
 /// Send the request to the node, whole, and hand back its answer, whole.
 async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Response {
+    let unreachable = crate::api::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "node_not_connected_exception",
+        format!("[{}] Node not connected", to.as_str()),
+    );
+    try_forward(rt, to, req).await.unwrap_or(unreachable)
+}
+
+/// Send a request to one node of the cluster, as the caller making it here,
+/// and hand back its answer; nothing when there is no cluster or the node
+/// could not be reached, so the caller can decide what that means for it.
+pub async fn send_to(to: &NodeId, req: Request) -> Option<Response> {
+    let rt = super::runtime()?;
+    if *to == rt.local() || !super::with_state(|s| s.nodes.contains_key(to)) {
+        return None;
+    }
+    try_forward(&rt, to, req).await
+}
+
+async fn try_forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Option<Response> {
     let caller = crate::security::layer::current_caller().unwrap_or_default();
     let (parts, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, crate::api::max_content_bytes() as usize).await {
         Ok(b) => b,
         Err(_) => {
-            return crate::api::err(
+            return Some(crate::api::err(
                 StatusCode::BAD_REQUEST,
                 "illegal_argument_exception",
                 "body could not be read",
-            );
+            ));
         }
     };
     let headers: Vec<(String, String)> = parts
@@ -1290,19 +1365,13 @@ async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Res
             std::time::Duration::from_secs(120),
         )
         .await;
-    let Some(answer) = answer else {
-        return crate::api::err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "node_not_connected_exception",
-            format!("[{}] Node not connected", to.as_str()),
-        );
-    };
+    let answer = answer?;
     if answer.kind == Kind::Error {
-        return crate::api::err(
+        return Some(crate::api::err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "exception",
             String::from_utf8_lossy(&answer.body).into_owned(),
-        );
+        ));
     }
     let v: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
     let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(500) as u16;
@@ -1320,7 +1389,7 @@ async fn forward(rt: &super::runtime::Runtime, to: &NodeId, req: Request) -> Res
             }
         }
     }
-    r
+    Some(r)
 }
 
 /// Answer a forwarded request: through this node's own router, as its caller.
