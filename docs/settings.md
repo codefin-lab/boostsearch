@@ -51,10 +51,21 @@ without the `plugins.security.` prefix:
 |---|---|
 | `VELOSEARCH_SSL_HTTP_ENABLED` / `plugins.security.ssl.http.enabled` | TLS on the HTTP layer. |
 | `plugins.security.ssl.http.pemcert_filepath` and friends | the certificate, its key and the authority, as files under the config directory. |
+| `VELOSEARCH_DISABLED` / `plugins.security.disabled` | `false` turns security on. |
+| `VELOSEARCH_INITIAL_ADMIN_PASSWORD` | the password of the first administrator, `admin`, as OpenSearch's `OPENSEARCH_INITIAL_ADMIN_PASSWORD`. Read only when the node has no saved configuration: the node saves a configuration with that one user, mapped to `all_access`, and reads that from then on. It must be at least 8 characters with an uppercase letter, a lowercase letter, a digit and a special character, or the node refuses to start. There is no default administrator and no demo user: a node with security on, no saved configuration and no password lets nobody in and answers `503 OpenSearch Security not initialized.` |
 | `plugins.security.authcz.admin_dn`, `plugins.security.restapi.roles_enabled`, … | as in OpenSearch. |
 
-Users, roles and role mappings live in the security index and are written
-through `_plugins/_security/api/*`, not in a file.
+Users, roles and role mappings are written through `_plugins/_security/api/*`.
+The configuration is the cluster's, as the security index is in OpenSearch:
+every change is made on the cluster manager, saved to its
+`config/security/*.yml` as one generation, and answered only once the cluster
+has committed it -- a change that could not be saved is a `500`, and a change
+asked of a cluster with no manager a `503`. Every node keeps a copy in its own
+`config/security`, and a node of a cluster lets nobody in by that copy until
+it has taken the manager's: a node that restarts, or loses its manager, answers
+`503` until it is following a manager again and holds its configuration. A
+configuration file that is missing beside the others, unreadable or not YAML
+is not replaced by anything; the node lets nobody in until it is put right.
 
 ## How hard it works
 

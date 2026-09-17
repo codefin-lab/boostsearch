@@ -97,10 +97,13 @@ def main():
     )
 
     single = ["-e", "VELOSEARCH_TRANSPORT_INSECURE=true"]
+    # a node with security on lets nobody in, and says it is not ready, until
+    # it has a first administrator
+    admin = ["-e", "VELOSEARCH_INITIAL_ADMIN_PASSWORD=Docker-Check-Key-2026"]
     kinds = [
         ("bs-off", ["-e", "VELOSEARCH_PLUGINS_SECURITY_DISABLED=true", *single], "healthy"),
-        ("bs-auth", ["-e", "VELOSEARCH_DISABLED=false", *single], "healthy"),
-        ("bs-tls", ["-e", "VELOSEARCH_DISABLED=false", *single,
+        ("bs-auth", ["-e", "VELOSEARCH_DISABLED=false", *admin, *single], "healthy"),
+        ("bs-tls", ["-e", "VELOSEARCH_DISABLED=false", *admin, *single,
                     "-v", f"{config}:/etc/velosearch:ro"], "healthy"),
         # its two peers never come: no cluster manager, ever
         ("bs-unready", ["-e", "VELOSEARCH_PLUGINS_SECURITY_DISABLED=true",

@@ -83,6 +83,101 @@ fn ok_json(v: Value) -> Response {
     (StatusCode::OK, axum::Json(v)).into_response()
 }
 
+/// The header a change's answer carries its generation in, from the cluster
+/// manager that made it to the node the caller asked, which holds the answer
+/// until it has taken that generation itself and takes the header off.
+pub const GENERATION_HEADER: &str = "x-velosearch-security-generation";
+
+/// The plugin's answer to a change it could not make: a 500 saying why.
+fn not_saved(why: impl std::fmt::Display) -> Response {
+    reply(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR", format!("Error {why}"))
+}
+
+fn no_cluster_manager() -> Response {
+    crate::api::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cluster_block_exception",
+        "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
+    )
+}
+
+/// Whether the configuration may be changed here.
+///
+/// It is the cluster's, and the cluster manager keeps it: a change is sent to
+/// the manager, and a node that has none -- or has just stopped being it --
+/// refuses the change as OpenSearch's `no cluster-manager` block refuses a
+/// write to the security index.
+fn writable_here() -> Result<(), Response> {
+    if crate::cluster::has_manager() && crate::cluster::is_cluster_manager() {
+        Ok(())
+    } else {
+        Err(no_cluster_manager())
+    }
+}
+
+/// Save the next configuration and put it in force in place of the one held,
+/// under the lock that numbers the changes; or answer why it was not.
+///
+/// The save's error used to be thrown away, and the change answered as made:
+/// it was in force in memory until the node restarted, and then it was gone.
+/// Nothing is put in force that is not on disk first.
+fn install(
+    store: &Store,
+    cfg: &mut SecurityConfig,
+    mut next: SecurityConfig,
+) -> Result<u64, Response> {
+    next.generation = cfg.generation + 1;
+    if let Err(e) = next.save() {
+        let dir = super::security_dir();
+        tracing::error!("the security configuration could not be saved in {}: {e}", dir.display());
+        return Err(not_saved(format!(
+            "the security configuration could not be saved in {}: {e}",
+            dir.display()
+        )));
+    }
+    *cfg = next;
+    store.security.touch(cfg);
+    Ok(cfg.generation)
+}
+
+/// Hold the answer until the cluster has committed the change: until then it
+/// is this node's alone, and a node that lost the cluster manager's seat in
+/// the meantime has made a change the cluster will not keep.
+async fn published(generation: u64) -> Result<(), Response> {
+    let Some(rt) = crate::cluster::runtime() else { return Ok(()) };
+    rt.republish();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let there = rt.with_state(|s| {
+            s.customs
+                .pointer("/security/generation")
+                .and_then(|g| g.as_u64())
+                .is_some_and(|g| g >= generation)
+        });
+        if there {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(if crate::cluster::has_manager() {
+                not_saved(
+                    "the change was saved on the cluster manager but the cluster did not commit it in time",
+                )
+            } else {
+                no_cluster_manager()
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A change's answer, carrying the generation it made.
+fn at_generation(mut r: Response, generation: u64) -> Response {
+    if let Ok(v) = axum::http::HeaderValue::from_str(&generation.to_string()) {
+        r.headers_mut().insert(GENERATION_HEADER, v);
+    }
+    r
+}
+
 /// The name the on-behalf-of token route is judged under, as a cluster
 /// permission.
 pub const OBO_ACTION: &str = "security:obo/create";
@@ -423,6 +518,48 @@ fn validate_password(name: &str, password: &str) -> Result<(), Response> {
     Ok(())
 }
 
+/// Every password a patch of internal users sets, checked and hashed now and
+/// written into the patch as the hash, so that no lock is held while bcrypt
+/// works (see `put_one`). `user` is the user a patch of one entry names; a
+/// patch of them all names each in the first part of its path.
+fn hash_patched_passwords(ops: &mut Value, user: Option<&str>) -> Result<(), Response> {
+    let Some(ops) = ops.as_array_mut() else { return Ok(()) };
+    for op in ops {
+        if op.get("op").and_then(|v| v.as_str()) == Some("remove") {
+            continue;
+        }
+        let path = op.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let parts: Vec<String> = path
+            .trim_start_matches('/')
+            .split('/')
+            .map(|s| s.replace("~1", "/").replace("~0", "~"))
+            .collect();
+        let (owner, rest) = match user {
+            Some(u) => (u.to_string(), &parts[..]),
+            None => (parts[0].clone(), &parts[1..]),
+        };
+        if rest.len() == 1 && rest[0] == "password" {
+            let Some(password) = op.get("value").and_then(|v| v.as_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            validate_password(&owner, &password)?;
+            op["path"] = json!(format!("{}hash", &path[..path.len() - "password".len()]));
+            op["value"] = json!(hash_password(&password));
+        } else if rest.is_empty()
+            && let Some(password) =
+                op.pointer("/value/password").and_then(|v| v.as_str()).map(str::to_string)
+        {
+            validate_password(&owner, &password)?;
+            if let Some(o) = op.get_mut("value").and_then(|v| v.as_object_mut()) {
+                o.remove("password");
+                o.insert("hash".into(), json!(hash_password(&password)));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether a patch writes both a password and a hash, which is the one thing
 /// `PUT` refuses about a user and `PATCH` did not.
 fn sets_both_password_and_hash(ops: &Value) -> bool {
@@ -597,27 +734,54 @@ pub async fn put_one(
         }
         body["hash"] = json!(hash_password(&service_password()));
     }
-    let mut cfg = store.security.config.write();
-    if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+    // A password is hashed here too, before the lock rather than under it.
+    // Every request on the node reads the configuration, the cluster's own
+    // checks among them: hashing under the write lock held them all for the
+    // length of a bcrypt, and a cluster manager taking changes one after
+    // another answered its followers late enough to be voted out.
+    if kind == "internalusers"
+        && let Some(password) = body.get("password").and_then(|p| p.as_str()).map(str::to_string)
+    {
+        if let Err(r) = validate_password(&name, &password) {
+            return r;
+        }
+        body["hash"] = json!(hash_password(&password));
+        if let Some(o) = body.as_object_mut() {
+            o.remove("password");
+        }
+    }
+    if let Err(r) = writable_here() {
         return r;
     }
-    let existed = one(&cfg, &kind, &name).is_some();
-    let before = cfg.document(&kind);
-    if let Err(r) = put_entry(&mut cfg, &kind, &name, &body) {
+    let (answer, generation) = {
+        let mut cfg = store.security.config.write();
+        if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+            return r;
+        }
+        let existed = one(&cfg, &kind, &name).is_some();
+        let before = cfg.document(&kind);
+        let mut next = cfg.clone();
+        if let Err(r) = put_entry(&mut next, &kind, &name, &body) {
+            return r;
+        }
+        let generation = match install(&store, &mut cfg, next) {
+            Ok(g) => g,
+            Err(r) => return r,
+        };
+        let after = cfg.document(&kind);
+        store.security.audit.internal_config_written_with(
+            &caller,
+            &caller.remote_address,
+            &kind,
+            Some(&before),
+            Some(&after),
+        );
+        (if existed { updated(&name) } else { created(&name) }, generation)
+    };
+    if let Err(r) = published(generation).await {
         return r;
     }
-    let _ = cfg.save();
-    store.security.touch(&cfg);
-    super::spread::after_write(&store, &cfg);
-    let after = cfg.document(&kind);
-    store.security.audit.internal_config_written_with(
-        &caller,
-        &caller.remote_address,
-        &kind,
-        Some(&before),
-        Some(&after),
-    );
-    if existed { updated(&name) } else { created(&name) }
+    at_generation(answer, generation)
 }
 
 pub async fn delete_one(
@@ -628,26 +792,37 @@ pub async fn delete_one(
     if let Err(r) = admin_for(&store, &caller, &kind, "DELETE") {
         return r;
     }
-    let mut cfg = store.security.config.write();
-    if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+    if let Err(r) = writable_here() {
         return r;
     }
-    let before = cfg.document(&kind);
-    if !remove_entry(&mut cfg, &kind, &name) {
-        return not_found(label(&kind), &name);
+    let generation = {
+        let mut cfg = store.security.config.write();
+        if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+            return r;
+        }
+        let before = cfg.document(&kind);
+        let mut next = cfg.clone();
+        if !remove_entry(&mut next, &kind, &name) {
+            return not_found(label(&kind), &name);
+        }
+        let generation = match install(&store, &mut cfg, next) {
+            Ok(g) => g,
+            Err(r) => return r,
+        };
+        let after = cfg.document(&kind);
+        store.security.audit.internal_config_written_with(
+            &caller,
+            &caller.remote_address,
+            &kind,
+            Some(&before),
+            Some(&after),
+        );
+        generation
+    };
+    if let Err(r) = published(generation).await {
+        return r;
     }
-    let _ = cfg.save();
-    store.security.touch(&cfg);
-    super::spread::after_write(&store, &cfg);
-    let after = cfg.document(&kind);
-    store.security.audit.internal_config_written_with(
-        &caller,
-        &caller.remote_address,
-        &kind,
-        Some(&before),
-        Some(&after),
-    );
-    deleted(&name)
+    at_generation(deleted(&name), generation)
 }
 
 /// JSON Patch over one entry or over the whole kind.
@@ -721,48 +896,69 @@ pub async fn patch_one(
     if let Err(r) = admin_for(&store, &caller, &kind, "PATCH") {
         return r;
     }
-    let ops: Value = match serde_json::from_str(&body) {
+    let mut ops: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(_) => return bad_request("Could not parse content of request."),
     };
-    let mut cfg = store.security.config.write();
-    if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+    let both = kind == "internalusers" && sets_both_password_and_hash(&ops);
+    if kind == "internalusers"
+        && !both
+        && let Err(r) = hash_patched_passwords(&mut ops, Some(&name))
+    {
         return r;
     }
-    let Some(mut current) = one(&cfg, &kind, &name) else { return not_found(label(&kind), &name) };
-    if kind == "internalusers" {
-        current["hash"] = json!(cfg.users.get(&name).map(|u| u.hash.clone()).unwrap_or_default());
-    }
-    if let Err(e) = apply_patch(&mut current, &ops) {
-        return bad_request(e);
-    }
-    if let Some(o) = current.as_object_mut() {
-        o.remove("reserved");
-        o.remove("hidden");
-        o.remove("static");
-    }
-    if let Err(r) = reject_unknown(&kind, &current) {
+    if let Err(r) = writable_here() {
         return r;
     }
-    // the checks `PUT` makes, which this path skipped: an action group could
-    // be patched into one with no actions, and a user could be given a
-    // password and a hash at once and be left with whichever won
-    if let Err(r) = required_fields(&kind, &current) {
+    let generation = {
+        let mut cfg = store.security.config.write();
+        if let Err(r) = immutable(label(&kind), &name, entity(&cfg, &kind, &name)) {
+            return r;
+        }
+        let Some(mut current) = one(&cfg, &kind, &name) else {
+            return not_found(label(&kind), &name);
+        };
+        if kind == "internalusers" {
+            current["hash"] =
+                json!(cfg.users.get(&name).map(|u| u.hash.clone()).unwrap_or_default());
+        }
+        if let Err(e) = apply_patch(&mut current, &ops) {
+            return bad_request(e);
+        }
+        if let Some(o) = current.as_object_mut() {
+            o.remove("reserved");
+            o.remove("hidden");
+            o.remove("static");
+        }
+        if let Err(r) = reject_unknown(&kind, &current) {
+            return r;
+        }
+        // the checks `PUT` makes, which this path skipped: an action group could
+        // be patched into one with no actions, and a user could be given a
+        // password and a hash at once and be left with whichever won
+        if let Err(r) = required_fields(&kind, &current) {
+            return r;
+        }
+        if both {
+            return bad_request(
+                "Please specify either 'hash' or 'password' when creating a new internal user.",
+            );
+        }
+        let mut next = cfg.clone();
+        if let Err(r) = put_entry(&mut next, &kind, &name, &current) {
+            return r;
+        }
+        let generation = match install(&store, &mut cfg, next) {
+            Ok(g) => g,
+            Err(r) => return r,
+        };
+        store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
+        generation
+    };
+    if let Err(r) = published(generation).await {
         return r;
     }
-    if kind == "internalusers" && sets_both_password_and_hash(&ops) {
-        return bad_request(
-            "Please specify either 'hash' or 'password' when creating a new internal user.",
-        );
-    }
-    if let Err(r) = put_entry(&mut cfg, &kind, &name, &current) {
-        return r;
-    }
-    let _ = cfg.save();
-    store.security.touch(&cfg);
-    super::spread::after_write(&store, &cfg);
-    store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
-    reply(StatusCode::OK, "OK", format!("'{name}' updated."))
+    at_generation(reply(StatusCode::OK, "OK", format!("'{name}' updated.")), generation)
 }
 
 pub async fn patch_all(
@@ -774,95 +970,111 @@ pub async fn patch_all(
     if let Err(r) = admin_for(&store, &caller, &kind, "PATCH") {
         return r;
     }
-    let ops: Value = match serde_json::from_str(&body) {
+    let mut ops: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(_) => return bad_request("Could not parse content of request."),
     };
-    let mut cfg = store.security.config.write();
-    if kind == "securityconfig" {
-        // This document is the authentication chain. A caller who may write
-        // it can add a domain that trusts a header of their choosing -- a
-        // proxy authenticator with `internalProxies: .*` turns an
-        // unauthenticated request carrying `x-proxy-roles: admin` into full
-        // access -- so the reference refuses it unless an operator has
-        // explicitly said otherwise, and so does this.
-        if !store.security.allow_config_rewrite {
-            return bad_request(
-                "Modifying the security configuration through the REST API is not allowed. \
+    if kind == "internalusers"
+        && let Err(r) = hash_patched_passwords(&mut ops, None)
+    {
+        return r;
+    }
+    if let Err(r) = writable_here() {
+        return r;
+    }
+    let generation = {
+        let mut cfg = store.security.config.write();
+        if kind == "securityconfig" {
+            // This document is the authentication chain. A caller who may write
+            // it can add a domain that trusts a header of their choosing -- a
+            // proxy authenticator with `internalProxies: .*` turns an
+            // unauthenticated request carrying `x-proxy-roles: admin` into full
+            // access -- so the reference refuses it unless an operator has
+            // explicitly said otherwise, and so does this.
+            if !store.security.allow_config_rewrite {
+                return bad_request(
+                    "Modifying the security configuration through the REST API is not allowed. \
                  Set plugins.security.unsupported.restapi.allow_securityconfig_modification \
                  to true to allow it.",
-            );
-        }
-        let mut current = cfg.document("config");
-        if let Err(e) = apply_patch(&mut current, &ops) {
-            return bad_request(e);
-        }
-        cfg.dynamic = current.get("config").cloned().unwrap_or(Value::Object(Map::new()));
-        let _ = cfg.save();
-        store.security.touch(&cfg);
-        super::spread::after_write(&store, &cfg);
-        return reply(StatusCode::OK, "OK", "Resource updated.");
-    }
-    let mut current = listing(&cfg, &kind);
-    if kind == "internalusers" {
-        for (n, u) in &cfg.users {
-            if let Some(v) = current.get_mut(n) {
-                v["hash"] = json!(u.hash);
+                );
             }
+            let mut current = cfg.document("config");
+            if let Err(e) = apply_patch(&mut current, &ops) {
+                return bad_request(e);
+            }
+            let mut next = cfg.clone();
+            next.dynamic = current.get("config").cloned().unwrap_or(Value::Object(Map::new()));
+            match install(&store, &mut cfg, next) {
+                Ok(g) => g,
+                Err(r) => return r,
+            }
+        } else {
+            let mut current = listing(&cfg, &kind);
+            if kind == "internalusers" {
+                for (n, u) in &cfg.users {
+                    if let Some(v) = current.get_mut(n) {
+                        v["hash"] = json!(u.hash);
+                    }
+                }
+            }
+            // every named entry must be free to change
+            if let Some(a) = ops.as_array() {
+                for op in a {
+                    let path = op.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = path.trim_start_matches('/').split('/').next().unwrap_or("");
+                    if let Err(r) = immutable(label(&kind), name, entity(&cfg, &kind, name)) {
+                        return r;
+                    }
+                }
+            }
+            let before = current.clone();
+            if let Err(e) = apply_patch(&mut current, &ops) {
+                return bad_request(e);
+            }
+            let Some(after) = current.as_object() else { return bad_request("Invalid patch") };
+            let before_o = before.as_object().cloned().unwrap_or_default();
+            // Every entry is written into a copy first. The entries used to go into
+            // the live configuration one at a time, and one of them being refused
+            // left the ones before it applied here -- in memory, since the refusal
+            // returned before anything was saved, so the node answered by a
+            // configuration no file held and a restart undid.
+            let mut next = cfg.clone();
+            for (n, v) in after {
+                if before_o.get(n) != Some(v) {
+                    let mut v = v.clone();
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("reserved");
+                        o.remove("hidden");
+                        o.remove("static");
+                    }
+                    if let Err(r) = reject_unknown(&kind, &v) {
+                        return r;
+                    }
+                    if let Err(r) = required_fields(&kind, &v) {
+                        return r;
+                    }
+                    if let Err(r) = put_entry(&mut next, &kind, n, &v) {
+                        return r;
+                    }
+                }
+            }
+            for n in before_o.keys() {
+                if !after.contains_key(n) {
+                    remove_entry(&mut next, &kind, n);
+                }
+            }
+            let generation = match install(&store, &mut cfg, next) {
+                Ok(g) => g,
+                Err(r) => return r,
+            };
+            store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
+            generation
         }
+    };
+    if let Err(r) = published(generation).await {
+        return r;
     }
-    // every named entry must be free to change
-    if let Some(a) = ops.as_array() {
-        for op in a {
-            let path = op.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let name = path.trim_start_matches('/').split('/').next().unwrap_or("");
-            if let Err(r) = immutable(label(&kind), name, entity(&cfg, &kind, name)) {
-                return r;
-            }
-        }
-    }
-    let before = current.clone();
-    if let Err(e) = apply_patch(&mut current, &ops) {
-        return bad_request(e);
-    }
-    let Some(after) = current.as_object() else { return bad_request("Invalid patch") };
-    let before_o = before.as_object().cloned().unwrap_or_default();
-    // Every entry is written into a copy first. The entries used to go into
-    // the live configuration one at a time, and one of them being refused
-    // left the ones before it applied here -- in memory, since the refusal
-    // returned before anything was saved, so the node answered by a
-    // configuration no file held and a restart undid.
-    let mut next = cfg.clone();
-    for (n, v) in after {
-        if before_o.get(n) != Some(v) {
-            let mut v = v.clone();
-            if let Some(o) = v.as_object_mut() {
-                o.remove("reserved");
-                o.remove("hidden");
-                o.remove("static");
-            }
-            if let Err(r) = reject_unknown(&kind, &v) {
-                return r;
-            }
-            if let Err(r) = required_fields(&kind, &v) {
-                return r;
-            }
-            if let Err(r) = put_entry(&mut next, &kind, n, &v) {
-                return r;
-            }
-        }
-    }
-    for n in before_o.keys() {
-        if !after.contains_key(n) {
-            remove_entry(&mut next, &kind, n);
-        }
-    }
-    *cfg = next;
-    let _ = cfg.save();
-    store.security.touch(&cfg);
-    super::spread::after_write(&store, &cfg);
-    store.security.audit.internal_config_written(&caller, &caller.remote_address, &kind);
-    reply(StatusCode::OK, "OK", "Resource updated.")
+    at_generation(reply(StatusCode::OK, "OK", "Resource updated."), generation)
 }
 
 // ---- service accounts and on-behalf-of tokens ----------------------------------------
@@ -933,17 +1145,22 @@ pub async fn service_authtoken(
     if !usable {
         return refused();
     }
+    if let Err(r) = writable_here() {
+        return r;
+    }
     let password = service_password();
     let hash = hash_password(&password);
-    {
+    let generation = {
         let mut cfg = store.security.config.write();
         let before = cfg.document("internalusers");
-        let Some(u) = cfg.users.get_mut(&name) else { return refused() };
+        let mut next = cfg.clone();
+        let Some(u) = next.users.get_mut(&name) else { return refused() };
         u.hash = hash;
-        cfg.merge_documents(&[]);
-        let _ = cfg.save();
-        store.security.touch(&cfg);
-        super::spread::after_write(&store, &cfg);
+        next.merge_documents(&[]);
+        let generation = match install(&store, &mut cfg, next) {
+            Ok(g) => g,
+            Err(r) => return r,
+        };
         let after = cfg.document("internalusers");
         store.security.audit.internal_config_written_with(
             &caller,
@@ -952,13 +1169,20 @@ pub async fn service_authtoken(
             Some(&before),
             Some(&after),
         );
+        generation
+    };
+    if let Err(r) = published(generation).await {
+        return r;
     }
-    reply(
-        StatusCode::OK,
-        "OK",
-        format!(
-            "'{name}' authtoken generated Basic auth token with user={name}, password={password}"
+    at_generation(
+        reply(
+            StatusCode::OK,
+            "OK",
+            format!(
+                "'{name}' authtoken generated Basic auth token with user={name}, password={password}"
+            ),
         ),
+        generation,
     )
 }
 
@@ -1134,21 +1358,43 @@ pub async fn change_password(
     let Some(current) = body.get("current_password").and_then(|v| v.as_str()) else {
         return bad_request("Missing field \"current_password\"");
     };
-    let mut cfg = store.security.config.write();
-    if cfg.authenticate(&caller.name, current).is_none() {
-        return bad_request("Could not validate your current password.");
+    if let Err(r) = writable_here() {
+        return r;
     }
+    // both bcrypt steps are taken on a copy, with no lock held: see `put_one`
+    let held = store.security.config.read().clone();
+    let Some(checked) = held.authenticate(&caller.name, current).map(|u| u.hash.clone()) else {
+        return bad_request("Could not validate your current password.");
+    };
     if let Err(r) = validate_password(&caller.name, password) {
         return r;
     }
-    if let Some(u) = cfg.users.get_mut(&caller.name) {
-        u.hash = hash_password(password);
+    let hash = hash_password(password);
+    let generation = {
+        let mut cfg = store.security.config.write();
+        // the password checked must still be the caller's
+        if cfg.users.get(&caller.name).map(|u| &u.hash) != Some(&checked) {
+            return bad_request("Could not validate your current password.");
+        }
+        let mut next = cfg.clone();
+        if let Some(u) = next.users.get_mut(&caller.name) {
+            u.hash = hash;
+        }
+        let generation = match install(&store, &mut cfg, next) {
+            Ok(g) => g,
+            Err(r) => return r,
+        };
+        store.security.audit.internal_config_written(
+            &caller,
+            &caller.remote_address,
+            "internalusers",
+        );
+        generation
+    };
+    if let Err(r) = published(generation).await {
+        return r;
     }
-    let _ = cfg.save();
-    store.security.touch(&cfg);
-    super::spread::after_write(&store, &cfg);
-    store.security.audit.internal_config_written(&caller, &caller.remote_address, "internalusers");
-    reply(StatusCode::OK, "OK", format!("'{}' updated.", caller.name))
+    at_generation(reply(StatusCode::OK, "OK", format!("'{}' updated.", caller.name)), generation)
 }
 
 pub async fn authinfo(
@@ -1187,7 +1433,16 @@ pub async fn authinfo(
 /// answered UP while it refused every write. A node that is the whole
 /// cluster elects itself in its first moments, which a probe's start period
 /// is for.
-pub async fn health() -> Response {
+pub async fn health(State(store): State<Store>) -> Response {
+    // a node with security on and no configuration it may let anybody in by
+    // is up and serving nobody, as the plugin's own health says of a node
+    // whose security index is not initialized
+    if store.security.enabled && store.security.standing() == super::Standing::NotInitialized {
+        let mut r =
+            ok_json(json!({"message": "Not initialized", "mode": "strict", "status": "DOWN"}));
+        *r.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+        return r;
+    }
     if !crate::cluster::has_manager() {
         let mut r =
             ok_json(json!({"message": "no cluster-manager", "mode": "strict", "status": "DOWN"}));

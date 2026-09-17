@@ -5,7 +5,10 @@
 Either there is no node at `VS`, or security is on and the credentials are
 wrong: the first request is made with `AUTH`, and a 401 looks the same as no
 server to it. Start the node with `make serve`, and check `AUTH` (default
-`admin:admin`).
+`admin:Example-Passphrase-2026`, the password `make serve` gives the node in
+`VELOSEARCH_INITIAL_ADMIN_PASSWORD`). A node started by hand with security on
+and neither that password nor a saved configuration lets nobody in, and
+answers every request with 503 `OpenSearch Security not initialized.`
 
 ## Step 1 answers 404, and everything after it fails
 
@@ -61,7 +64,7 @@ role. If the role is there, read it back and compare its `index_patterns` and
 `allowed_actions` with the action and index in the refusal:
 
 ```bash
-curl -su admin:admin localhost:9281/_plugins/_security/api/roles/ingest_orders | jq
+curl -su admin:Example-Passphrase-2026 localhost:9281/_plugins/_security/api/roles/ingest_orders | jq
 ```
 
 ## The old password still works for a moment
@@ -105,7 +108,7 @@ queries to its own run instead. To start again, throw away the data directory
 (`make serve` does that each time it starts), or delete the index yourself:
 
 ```bash
-curl -su admin:admin -XDELETE 'localhost:9281/security-auditlog-*'
+curl -su admin:Example-Passphrase-2026 -XDELETE 'localhost:9281/security-auditlog-*'
 ```
 
 ## Cleaning up

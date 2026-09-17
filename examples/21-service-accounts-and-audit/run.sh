@@ -4,7 +4,7 @@
 
 # with no .env, the node `make serve` starts; anything in .env or the
 # environment wins
-[ -f "$(dirname "$0")/.env" ] || { VS="${VS:-http://127.0.0.1:9281}"; AUTH="${AUTH:-admin:admin}"; }
+[ -f "$(dirname "$0")/.env" ] || { VS="${VS:-http://127.0.0.1:9281}"; AUTH="${AUTH:-admin:Example-Passphrase-2026}"; }
 source "$(dirname "$0")/lib.sh"
 
 IDX=orders-2026.09

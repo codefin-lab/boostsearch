@@ -486,7 +486,7 @@ fn push_json_str(out: &mut String, text: &str) {
 /// The translog's durability call: a plain `fsync` on macOS, as Java's
 /// `FileChannel.force` is there (Rust's `sync_data` would be the far
 /// dearer `F_FULLFSYNC`); `sync_data` elsewhere, where they are the same.
-fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::io::AsRawFd;

@@ -13,10 +13,19 @@ which sets `VELOSEARCH_DISABLED=false` and
 `VELOSEARCH_RESTAPI_ROLES_ENABLED=all_access`. If you are using your own node,
 start it with both.
 
+## Every request returns 503 `OpenSearch Security not initialized.`
+
+The node has security on and no configuration: it was started with neither a
+saved configuration in its data directory nor `VELOSEARCH_INITIAL_ADMIN_PASSWORD`,
+and there is no default administrator. `make serve` sets the password; a node
+started by hand needs it too.
+
 ## Every request returns 401
 
-The administrator credentials are wrong. They default to `admin:admin`; set
-`AUTH` in `.env` or the environment:
+The administrator credentials are wrong. They default to
+`admin:Example-Passphrase-2026`, the password `make serve` gives the node
+in `VELOSEARCH_INITIAL_ADMIN_PASSWORD`; a node started another way has the
+password it was given. Set `AUTH` in `.env` or the environment:
 
 ```bash
 AUTH=admin:mypassword ./run.sh
@@ -45,7 +54,7 @@ The DLS filter is not being applied. Check that the role has it and that the
 value is a **string** containing JSON, not a JSON object:
 
 ```bash
-curl -su admin:admin localhost:9266/_plugins/_security/api/roles/tenant_northwind | jq
+curl -su admin:Example-Passphrase-2026 localhost:9266/_plugins/_security/api/roles/tenant_northwind | jq
 ```
 
 `"dls"` must read `"{\"term\": {\"tenant\": \"northwind\"}}"`. An object there
@@ -84,9 +93,9 @@ node was started with, or delete them individually:
 ```bash
 make clean
 for r in tenant_northwind tenant_contoso support; do
-  curl -su admin:admin -XDELETE localhost:9266/_plugins/_security/api/roles/$r
+  curl -su admin:Example-Passphrase-2026 -XDELETE localhost:9266/_plugins/_security/api/roles/$r
 done
 for u in nw-reader co-reader agent-smith; do
-  curl -su admin:admin -XDELETE localhost:9266/_plugins/_security/api/internalusers/$u
+  curl -su admin:Example-Passphrase-2026 -XDELETE localhost:9266/_plugins/_security/api/internalusers/$u
 done
 ```

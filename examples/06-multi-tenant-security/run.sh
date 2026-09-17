@@ -2,7 +2,7 @@
 # One index, several tenants, and a filter that is part of the query rather
 # than a proxy in front of it.
 source "$(dirname "$0")/lib.sh"
-AUTH="${AUTH:-admin:admin}"
+AUTH="${AUTH:-admin:Example-Passphrase-2026}"
 CURL=(curl -sS --fail-with-body -u "$AUTH")
 IDX=tickets
 

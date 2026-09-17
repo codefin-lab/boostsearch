@@ -136,10 +136,14 @@ def main():
         f"plugins.security.ssl.http.pemtrustedcas_filepath: {CERTS / 'root-ca.pem'}\n"
     )
     single = {"VELOSEARCH_TRANSPORT_INSECURE": "true"}
+    # security on, with the first administrator's password a node needs to be
+    # let into at all
+    secured = {"VELOSEARCH_DISABLED": "false",
+               "VELOSEARCH_INITIAL_ADMIN_PASSWORD": "Health-Check-Key-2026"}
     kinds = [
         ("security-off", 9388, {**single, "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true"}, ""),
-        ("auth-on", 9390, {**single, "VELOSEARCH_DISABLED": "false"}, ""),
-        ("tls-on", 9392, {**single, "VELOSEARCH_DISABLED": "false"}, tls_yml),
+        ("auth-on", 9390, {**single, **secured}, ""),
+        ("tls-on", 9392, {**single, **secured}, tls_yml),
         # one of three whose other two never come: no cluster manager, ever
         ("unready", 9394, {
             "VELOSEARCH_PLUGINS_SECURITY_DISABLED": "true",

@@ -61,11 +61,12 @@ config = pathlib.Path(data) / "config"
 env = dict(os.environ)
 env.update({"VELOSEARCH_ADDR": f"127.0.0.1:{PORT}", "VELOSEARCH_DATA": data,
             "VELOSEARCH_CONFIG": str(config), "VELOSEARCH_TRANSPORT_PORT": str(TPORT),
-            "VELOSEARCH_DISABLED": "false", "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access"})
+            "VELOSEARCH_DISABLED": "false", "VELOSEARCH_RESTAPI_ROLES_ENABLED": "all_access",
+            "VELOSEARCH_INITIAL_ADMIN_PASSWORD": "Dls-Check-Key-2026"})
 log = open(pathlib.Path(data) / "node.log", "w")
 node = subprocess.Popen([args.binary], env=env, stdout=log, stderr=subprocess.STDOUT)
 url = f"http://127.0.0.1:{PORT}"
-admin = ("admin", "admin")
+admin = ("admin", "Dls-Check-Key-2026")
 for _ in range(60):
     if call(url, "GET", "/", admin)[0]:
         break

@@ -74,6 +74,29 @@ pub fn forbidden(reason: String) -> Response {
     (StatusCode::FORBIDDEN, axum::Json(body)).into_response()
 }
 
+/// The answer to anybody while the node has no configuration it may let them
+/// in by: the plugin's own words for a node whose security index is not
+/// there, or the `no cluster-manager` block for a node of a cluster that has
+/// lost its manager and so cannot know what was revoked while it was gone.
+fn not_ready(standing: super::Standing) -> Response {
+    match standing {
+        super::Standing::NoManager => crate::api::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_block_exception",
+            "blocked by: [SERVICE_UNAVAILABLE/2/no cluster-manager];",
+        ),
+        _ => {
+            let mut r = (StatusCode::SERVICE_UNAVAILABLE, "OpenSearch Security not initialized.")
+                .into_response();
+            r.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=UTF-8"),
+            );
+            r
+        }
+    }
+}
+
 /// `no permissions for [action] and User [...]`
 pub fn no_permissions(action: &str, caller: &Caller) -> Response {
     forbidden(format!("no permissions for [{action}] and {}", caller.describe()))
@@ -111,6 +134,14 @@ pub async fn authenticate(State(store): State<Store>, req: Request, next: Next) 
         )
     {
         return run_as(Caller::default(), req, next).await;
+    }
+    // Nobody is let in by a configuration the node does not have, or by one
+    // it cannot say is the cluster's. A node that rejoined its cluster used to
+    // answer by the files it restarted with, and a user deleted while it was
+    // away logged in through it for as long as it ran.
+    let standing = sec.standing();
+    if standing != super::Standing::Ready {
+        return not_ready(standing);
     }
     // the plain listener reports the peer as this crate's own type, the TLS
     // one hands the address in as itself

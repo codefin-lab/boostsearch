@@ -362,6 +362,13 @@ impl Runtime {
         let _ = self.inputs.send(Input::Message(envelope));
     }
 
+    /// Ask the manager to publish what its store holds now rather than at
+    /// its next look: a change the caller is waiting on the cluster to commit.
+    /// A node that is not the manager does nothing with it.
+    pub fn republish(&self) {
+        let _ = self.inputs.send(Input::Timer(super::coordinator::T_REPUBLISH));
+    }
+
     /// The host finished (or failed) a copy the manager put here.
     pub fn shard_done(&self, allocation_id: String, result: Result<(), String>) {
         let _ = self.inputs.send(Input::ShardDone { allocation_id, result });

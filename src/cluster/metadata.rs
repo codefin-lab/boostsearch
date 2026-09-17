@@ -50,6 +50,12 @@ pub trait MetadataSource: Send + Sync {
     fn apply_index_metadata(&self, _meta: &IndexMetadata) {}
     /// Take the published customs.
     fn apply_customs(&self, _customs: &Value) {}
+    /// Take the security configuration the customs carry, as the manager
+    /// (`leading`) or as a node following it, and let callers in by it.
+    fn settle_security(&self, _customs: &Value, _leading: bool) {}
+    /// The manager is gone: let nobody in by a configuration that may have
+    /// been changed since.
+    fn security_lost(&self) {}
     /// Let go of a local index the cluster no longer places here.
     fn drop_local(&self, _index: &str) {}
     /// The index copies this node holds on disk -- name, uuid and the
@@ -369,6 +375,14 @@ impl MetadataSource for StoreSource {
         if customs.is_object() && *customs != self.store.customs() {
             self.store.replace_customs(customs);
         }
+    }
+
+    fn settle_security(&self, customs: &Value, leading: bool) {
+        self.store.security.settle(customs.get("security"), leading);
+    }
+
+    fn security_lost(&self) {
+        self.store.security.lost_manager();
     }
 
     fn drop_local(&self, index: &str) {

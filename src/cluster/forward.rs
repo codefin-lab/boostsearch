@@ -125,11 +125,58 @@ pub fn classify(method: &Method, path: &str) -> Target {
             | "_pit" | "_segments" | "_recovery" | "_shard_stores" | "_mapping" | "_settings"
             | "_open" | "_close" => Target::Manager,
             "_refresh" | "_flush" | "_forcemerge" | "_cache" => Target::Broadcast(None),
+            // the security configuration is the cluster's, and the cluster
+            // manager keeps it: a change made on whichever node took it was
+            // that node's alone, and two made on two nodes at once each put
+            // everything but its own change back the way it was
+            "_plugins" if is_write && changes_security_configuration(method, rest) => {
+                Target::Manager
+            }
             _ => Target::Local,
         };
     }
     // `/{index}` and `/{index}/...`
     classify_index(method, head, rest, is_write)
+}
+
+/// Whether a request under `_plugins/` writes the security configuration:
+/// users, roles, mappings, action groups, tenants, the authentication chain,
+/// a caller's own password, a service account's new secret. The token and
+/// audit endpoints under the same prefix keep nothing of it.
+fn changes_security_configuration(method: &Method, rest: &str) -> bool {
+    let Some(api) = rest.trim_matches('/').strip_prefix("_security/api/") else { return false };
+    let (kind, after) = first_segment(api);
+    match kind {
+        "internalusers" | "roles" | "rolesmapping" | "actiongroups" | "tenants"
+        | "securityconfig" => {
+            // `POST internalusers/<name>/authtoken` is the one POST that writes
+            after.is_empty()
+                || !after.contains('/')
+                || (*method == Method::POST && after.ends_with("/authtoken"))
+        }
+        "account" => *method == Method::PUT,
+        _ => false,
+    }
+}
+
+/// Hold the answer to a change of the security configuration until this node
+/// has taken the generation the change made, and take off the header that
+/// carried it: the caller's next request to this node is let in or refused by
+/// the configuration the answer said was in force.
+async fn wait_for_security(store: &Store, mut response: Response) -> Response {
+    let Some(value) = response.headers_mut().remove(crate::security::api::GENERATION_HEADER) else {
+        return response;
+    };
+    let Some(generation) = value.to_str().ok().and_then(|v| v.parse::<u64>().ok()) else {
+        return response;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while store.security.config.read().generation < generation
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    response
 }
 
 /// Which node a request about one index (or an expression naming several)
@@ -359,7 +406,8 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         return ANSWERING_FORWARD.scope(true, run_with_replication(&store, req, next)).await;
     }
     let Some(rt) = super::runtime() else {
-        return run_with_replication(&store, req, next).await;
+        let r = run_with_replication(&store, req, next).await;
+        return wait_for_security(&store, r).await;
     };
     let me = rt.local();
     let path = req.uri().path().to_string();
@@ -452,11 +500,13 @@ pub async fn layer(State(store): State<Store>, req: Request, next: Next) -> Resp
         let r = run_with_replication(&store, req, next).await;
         let r = wait_for_metadata(&store, settles, r).await;
         let r = wait_for_custom(settles_c, r).await;
+        let r = wait_for_security(&store, r).await;
         return wait_for_alias(&store, settles_a, version_before, r).await;
     };
     let r = forward(&rt, &to, req).await;
     let r = wait_for_metadata(&store, settles, r).await;
     let r = wait_for_custom(settles_c, r).await;
+    let r = wait_for_security(&store, r).await;
     wait_for_alias(&store, settles_a, version_before, r).await
 }
 

@@ -31,6 +31,7 @@ mod objects;
 mod registry;
 mod settings;
 mod translog;
+pub(crate) use translog::sync_file;
 mod writer;
 
 /// Field roles in the fixed schema shared by every index.
