@@ -32,8 +32,7 @@ by a script in `tools/`, and [README.md](README.md) says which.
   installed, which a single binary cannot be
 - **166 of 183** canonical requests answered identically to OpenSearch 3.1.0
   once ids and timings are scrubbed (`tools/compat_audit.py replay`)
-- **146 of 167** REST APIs routed on every path and method their spec names,
-  8 more on some of them; what is not routed answers 404 or 501
+- **167 of 167** REST APIs routed on every path and method their spec names
   (`tools/endpoint_gate.py`)
 - **quicker or lighter on all 34 dimensions**, measured beside OpenSearch 3.1.0
   on the same Google Compute Engine `n2-standard-8`, with the same corpus and
@@ -66,3 +65,7 @@ Dashboards' browser application. Recently added:
 - routing that narrows a search to the shards it names
 - service accounts and on-behalf-of tokens
 - scheduled refresh
+- weighted routing and decommissioning by awareness attribute, kept in cluster
+  metadata; the dangling-index, remote-store and stored-task-result endpoints,
+  each answering as a node without the feature answers
+- `_nodes` and `_cluster/stats` narrowed to the nodes and metrics a path names

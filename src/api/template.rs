@@ -566,6 +566,43 @@ pub async fn put_index_template(
     respond(&p, json!({"acknowledged": true}))
 }
 
+/// `HEAD /_index_template/{name}` -- whether the templates named are there.
+///
+/// Every name in a comma-separated list must be there, and a pattern must
+/// reach at least one, or the answer is 404. There is no body either way.
+pub async fn exists_index_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+) -> Response {
+    let held: Vec<String> = store
+        .get_templates()
+        .into_iter()
+        .filter(|(_, v)| v.get("__composable").is_some())
+        .map(|(k, _)| k)
+        .collect();
+    found_status(&name, &held)
+}
+
+/// `HEAD /_component_template/{name}` -- the same question of a component.
+pub async fn exists_component_template(
+    State(store): State<Store>,
+    Path(name): Path<String>,
+) -> Response {
+    let held: Vec<String> = store.get_components().into_keys().collect();
+    found_status(&name, &held)
+}
+
+/// 200 when the expression reaches everything it names, 404 otherwise.
+fn found_status(expr: &str, held: &[String]) -> Response {
+    let all = expr.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).all(|pat| {
+        if pat == "_all" || pat == "*" {
+            return !held.is_empty();
+        }
+        held.iter().any(|n| n == pat || crate::store::glob_match(pat, n))
+    });
+    if all { StatusCode::OK.into_response() } else { StatusCode::NOT_FOUND.into_response() }
+}
+
 pub async fn get_index_template(
     State(store): State<Store>,
     name: Option<Path<String>>,

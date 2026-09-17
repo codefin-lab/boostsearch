@@ -176,6 +176,7 @@ impl Store {
                 serde_json::json!({"persistent": {}, "transient": {}}),
             )),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            awareness: Arc::new(RwLock::new(serde_json::json!({}))),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
             request_cache: Arc::new(Default::default()),
@@ -208,6 +209,7 @@ impl Store {
                 serde_json::json!({"persistent": {}, "transient": {}}),
             )),
             voting_exclusions: Arc::new(RwLock::new(Vec::new())),
+            awareness: Arc::new(RwLock::new(serde_json::json!({}))),
             components: Arc::new(RwLock::new(HashMap::new())),
             pits: Arc::new(RwLock::new(HashMap::new())),
             request_cache: Arc::new(Default::default()),
@@ -224,6 +226,7 @@ impl Store {
             scripts: Arc::new(RwLock::new(HashMap::new())),
         };
         recover_interrupted_restores(&dir);
+        store.load_awareness();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {

@@ -36,11 +36,181 @@ pub async fn script_languages(Query(p): Query<Params>) -> Response {
     )
 }
 
-/// `_nodes/stats` -- what the one node has been doing.
-pub async fn nodes_stats(
+/// The sections `_nodes` reports about a node, which a path may pick from.
+const INFO_METRICS: &[&str] = &[
+    "settings",
+    "os",
+    "process",
+    "jvm",
+    "thread_pool",
+    "transport",
+    "http",
+    "plugins",
+    "ingest",
+    "aggregations",
+    "indices",
+    "search_pipelines",
+];
+
+/// Which nodes a request under `_nodes` is about.
+///
+/// A selector is a comma-separated list of node ids, node names, name
+/// patterns, or one of the words that stand for a set of them. A selector
+/// that names no node of this cluster answers for none -- the reference
+/// answers `{"_nodes":{"total":0,...},"nodes":{}}` rather than refusing --
+/// and `None` is every node.
+pub(crate) fn selected_nodes(selector: Option<&str>) -> Vec<String> {
+    let me = crate::cluster::identity();
+    let live = crate::cluster::current_state();
+    let mut every: Vec<String> = vec![me.id.as_str().to_string()];
+    for id in live.nodes.keys() {
+        if id.as_str() != me.id.as_str() {
+            every.push(id.as_str().to_string());
+        }
+    }
+    let Some(selector) = selector.filter(|s| !s.is_empty()) else { return every };
+    let manager = live.cluster_manager.clone();
+    let mut picked: Vec<String> = Vec::new();
+    for part in selector.split(',').map(|s| s.trim()) {
+        for id in &every {
+            if picked.iter().any(|p| p == id) {
+                continue;
+            }
+            let name = if *id == me.id.as_str() {
+                me.name.clone()
+            } else {
+                live.nodes
+                    .iter()
+                    .find(|(n, _)| n.as_str() == id)
+                    .map(|(_, n)| n.name.clone())
+                    .unwrap_or_default()
+            };
+            let hit = match part {
+                "_all" | "*" => true,
+                "_local" => *id == me.id.as_str(),
+                "_master" | "_cluster_manager" => {
+                    manager.as_ref().map(|m| m.as_str() == id.as_str()).unwrap_or(false)
+                }
+                other => {
+                    other == id
+                        || other == name
+                        || (other.contains('*') && crate::store::glob_match(other, &name))
+                }
+            };
+            if hit {
+                picked.push(id.clone());
+            }
+        }
+    }
+    picked
+}
+
+/// What a node other than this one can be said about from its identity alone.
+fn other_node_identity(id: &str) -> Option<(Value, Value)> {
+    let live = crate::cluster::current_state();
+    let n = live.nodes.iter().find(|(k, _)| k.as_str() == id).map(|(_, n)| n.clone())?;
+    let ip = n.transport_address.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_default();
+    Some((
+        json!(n.name),
+        json!({"transport_address": n.transport_address, "host": ip, "ip": ip,
+                                "roles": n.roles, "attributes": n.attributes}),
+    ))
+}
+
+/// The `_nodes` header every one of these answers carries.
+fn nodes_header(nodes: &[String]) -> Value {
+    json!({"total": nodes.len(), "successful": nodes.len(), "failed": 0})
+}
+
+/// `GET /_nodes/...` and `GET /_cluster/nodes/...` -- the node information,
+/// the statistics, the API usage and the hot threads all live under one
+/// prefix and are told apart by the parts of the path.
+pub async fn nodes_get(
     State(store): State<Store>,
-    rest: Option<Path<String>>,
+    uri: axum::http::Uri,
     Query(p): Query<Params>,
+) -> Response {
+    let parts = nodes_path_parts(uri.path());
+    let last = parts.last().map(String::as_str);
+    if matches!(last, Some("hot_threads" | "hotthreads")) {
+        // the threads sampled are this process's: a node named in the path
+        // that is not this one has none here to report
+        if parts.len() > 1 {
+            let here = selected_nodes(Some(&parts[0]))
+                .iter()
+                .any(|id| *id == crate::cluster::identity().id.as_str());
+            if !here {
+                return ([("content-type", "text/plain; charset=UTF-8")], String::new())
+                    .into_response();
+            }
+        }
+        return super::hot_threads::hot_threads(&format!("/_nodes/{}", parts.join("/")), &p).await;
+    }
+    // `stats` and `usage` are the words that tell a report from the node
+    // information, wherever in the path they stand
+    let at = parts.iter().position(|s| s == "stats" || s == "usage");
+    match at {
+        Some(i) if parts[i] == "stats" => {
+            let nodes = selected_nodes((i > 0).then(|| parts[0].as_str()));
+            nodes_stats(&store, &p, &nodes, parts.get(i + 1), parts.get(i + 2))
+        }
+        Some(i) => {
+            let nodes = selected_nodes((i > 0).then(|| parts[0].as_str()));
+            nodes_usage(&p, &nodes, parts.get(i + 1))
+        }
+        // `/_nodes/<one part>` is a node selector when it names a node and a
+        // list of metrics when it names metrics, as the reference reads it
+        None => match parts.len() {
+            0 => nodes_info(&p, &selected_nodes(None), None),
+            1 if is_info_metrics(&parts[0]) => {
+                nodes_info(&p, &selected_nodes(None), Some(&parts[0]))
+            }
+            1 => nodes_info(&p, &selected_nodes(Some(&parts[0])), None),
+            _ => nodes_info(&p, &selected_nodes(Some(&parts[0])), Some(&parts[1])),
+        },
+    }
+}
+
+/// Whether a path part names metrics rather than a node.
+fn is_info_metrics(part: &str) -> bool {
+    part.split(',').all(|m| {
+        let m = m.trim();
+        m == "_all" || INFO_METRICS.contains(&m)
+    })
+}
+
+/// A write under `_nodes`: rereading the keystore is the only one.
+pub async fn nodes_write(uri: axum::http::Uri, Query(p): Query<Params>) -> Response {
+    let parts = nodes_path_parts(uri.path());
+    if parts.last().map(String::as_str) == Some("reload_secure_settings") {
+        let nodes = selected_nodes((parts.len() > 1).then(|| parts[0].as_str()));
+        return nodes_reload_secure_settings(&p, &nodes);
+    }
+    crate::api::err(
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "not_implemented_exception",
+        "not ported yet",
+    )
+}
+
+/// The parts of the path after the prefix, whichever of the two spellings of
+/// the prefix was used.
+fn nodes_path_parts(path: &str) -> Vec<String> {
+    let rest = path
+        .trim_start_matches('/')
+        .strip_prefix("_cluster/nodes")
+        .or_else(|| path.trim_start_matches('/').strip_prefix("_nodes"))
+        .unwrap_or("");
+    rest.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
+}
+
+/// `_nodes/stats` -- what each node has been doing.
+fn nodes_stats(
+    store: &Store,
+    p: &Params,
+    nodes: &[String],
+    metrics: Option<&String>,
+    index_metric: Option<&String>,
 ) -> Response {
     // the path may name which metrics are wanted, and a name that is not one
     // of them is a mistake rather than something to pass over
@@ -72,21 +242,12 @@ pub async fn nodes_stats(
         "caches",
         "remote_store",
     ];
-    // only the first path part names the metrics; anything after it narrows
+    // the part after `stats` names the metrics; the one after that narrows
     // within one, and is checked by whatever owns that metric
-    let rest_parts: Vec<String> =
-        rest.map(|Path(r)| r.split('/').map(|s| s.to_string()).collect()).unwrap_or_default();
-    let asked: Vec<String> = rest_parts
-        .first()
-        .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-    for m in asked.iter().filter(|m| !m.is_empty() && *m != "stats") {
-        // a node id is also allowed in this position, and ours is known
-        if METRICS.contains(&m.as_str())
-            || matches!(m.as_str(), "_local" | "_all")
-            || m == crate::cluster::identity().id.as_str()
-            || *m == crate::cluster::identity().name
-        {
+    let asked: Vec<String> =
+        metrics.map(|r| r.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    for m in asked.iter().filter(|m| !m.is_empty()) {
+        if METRICS.contains(&m.as_str()) {
             continue;
         }
         // a near miss is a typo, and naming the metric meant saves a reading
@@ -106,16 +267,27 @@ pub async fn nodes_stats(
         );
     }
     // a second path part narrows within `indices` to the metrics it names
-    let index_metrics: Vec<String> = rest_parts
-        .get(1)
+    let index_metrics: Vec<String> = index_metric
         .map(|r| r.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
     let me = crate::cluster::identity();
+    // a selector that named no node of this cluster has nothing to report,
+    // and nothing to fail on either
+    if nodes.is_empty() {
+        return respond(
+            p,
+            json!({
+                "_nodes": nodes_header(nodes),
+                "cluster_name": me.cluster_name,
+                "nodes": {},
+            }),
+        );
+    }
     let level = p.get("level").map(|s| s.as_str()).unwrap_or("node");
     if !matches!(level, "node" | "indices" | "shards") {
         // the reference fails the node rather than the request
         return respond(
-            &p,
+            p,
             json!({
                 "_nodes": {"total": 1, "successful": 0, "failed": 1, "failures": [{
                     "type": "failed_node_exception",
@@ -138,63 +310,59 @@ pub async fn nodes_stats(
         }
         v
     };
-    let indices = node_indices_stats(&store, &p, level, &narrow, &index_metrics);
-    let mut local = json!({
-        "timestamp": crate::store::now_millis(), "name": me.name,
-        "transport_address": me.transport_address,
-        "host": me.host, "ip": me.host,
-        "roles": me.roles, "attributes": me.attributes,
-        "indices": indices,
-    });
-    if let (Some(o), Value::Object(machine)) = (local.as_object_mut(), machine_stats(&store)) {
-        o.extend(machine);
-        o.insert("ingest".into(), crate::api::ingest_stats_json(&store));
-    }
     // the metrics the path named, and what says which node this is
     let wanted: Vec<String> = asked
         .iter()
-        .filter(|m| METRICS.contains(&String::as_str(m)))
         .map(|m| if m == "breaker" { "breakers".to_string() } else { m.clone() })
         .collect();
-    if !wanted.is_empty()
-        && !wanted.iter().any(|m| m == "_all")
-        && let Some(o) = local.as_object_mut()
-    {
-        const IDENTITY: &[&str] =
-            &["timestamp", "name", "transport_address", "host", "ip", "roles", "attributes"];
-        o.retain(|k, _| IDENTITY.contains(&k.as_str()) || wanted.iter().any(|m| m == k));
-    }
-    let mut out = json!({
-        "_nodes": {"total": 1, "successful": 1, "failed": 0},
-        "cluster_name": me.cluster_name,
-        "nodes": {me.id.as_str(): local},
-    });
-    // every other node the cluster holds, with what its identity says
-    {
-        let live = crate::cluster::current_state();
-        let me = crate::cluster::identity();
-        if let Some(nodes) = out.get_mut("nodes").and_then(|n| n.as_object_mut()) {
-            for (id, n) in &live.nodes {
-                if *id == me.id {
-                    continue;
-                }
-                let ip = n
-                    .transport_address
-                    .rsplit_once(':')
-                    .map(|(h, _)| h.to_string())
-                    .unwrap_or_default();
-                nodes.insert(
-                    id.as_str().to_string(),
-                    json!({
-                        "timestamp": 0, "name": n.name, "transport_address": n.transport_address,
-                        "host": ip, "ip": ip, "roles": n.roles, "attributes": n.attributes,
-                    }),
-                );
-            }
+    let keep = |v: &mut Value| {
+        if wanted.is_empty() || wanted.iter().any(|m| m == "_all") {
+            return;
         }
-        out["_nodes"] = json!({"total": live.nodes.len().max(1), "successful": live.nodes.len().max(1), "failed": 0});
+        if let Some(o) = v.as_object_mut() {
+            const IDENTITY: &[&str] =
+                &["timestamp", "name", "transport_address", "host", "ip", "roles", "attributes"];
+            o.retain(|k, _| IDENTITY.contains(&k.as_str()) || wanted.iter().any(|m| m == k));
+        }
+    };
+    let mut reported = serde_json::Map::new();
+    for id in nodes {
+        if *id == me.id.as_str() {
+            let indices = node_indices_stats(store, p, level, &narrow, &index_metrics);
+            let mut local = json!({
+                "timestamp": crate::store::now_millis(), "name": me.name,
+                "transport_address": me.transport_address,
+                "host": me.host, "ip": me.host,
+                "roles": me.roles, "attributes": me.attributes,
+                "indices": indices,
+            });
+            if let (Some(o), Value::Object(machine)) = (local.as_object_mut(), machine_stats(store))
+            {
+                o.extend(machine);
+                o.insert("ingest".into(), crate::api::ingest_stats_json(store));
+            }
+            keep(&mut local);
+            reported.insert(id.clone(), local);
+            continue;
+        }
+        // every other node of the cluster, with what its identity says: the
+        // counts are the node's own and are not asked for over the wire here
+        let Some((name, mut rest)) = other_node_identity(id) else { continue };
+        if let Some(o) = rest.as_object_mut() {
+            o.insert("timestamp".into(), json!(0));
+            o.insert("name".into(), name);
+        }
+        keep(&mut rest);
+        reported.insert(id.clone(), rest);
     }
-    respond(&p, out)
+    respond(
+        p,
+        json!({
+            "_nodes": nodes_header(nodes),
+            "cluster_name": me.cluster_name,
+            "nodes": Value::Object(reported),
+        }),
+    )
 }
 
 /// The `indices` section of a node's statistics: every index it holds summed,
@@ -740,78 +908,59 @@ pub fn node_attrs() -> Vec<(String, String)> {
     out
 }
 
-/// `/_nodes/{*rest}` -- the node information, or one of the two reports that
-/// live under the same prefix and are told apart by their last part.
-pub async fn nodes_info_scoped(Path(rest): Path<String>, Query(p): Query<Params>) -> Response {
-    if rest.split('/').next_back() == Some("usage") {
-        return nodes_usage(Query(p)).await;
-    }
-    if matches!(rest.split('/').next_back(), Some("hot_threads" | "hotthreads")) {
-        // the threads sampled are this process's: a node named in the path
-        // that is not this one has none here to report
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() > 1 {
-            let me = crate::cluster::identity();
-            let here = parts[0].split(',').any(|n| {
-                matches!(n, "_local" | "_all" | "*" | "_master" | "_cluster_manager")
-                    || n == me.id.as_str()
-                    || n == me.name
-                    || (n.contains('*') && crate::store::glob_match(n, &me.name))
-            });
-            if !here {
-                return ([("content-type", "text/plain; charset=UTF-8")], String::new())
-                    .into_response();
-            }
+/// `_nodes` -- what each node is: its identity, and the sections of its
+/// description a path asked for.
+fn nodes_info(p: &Params, nodes: &[String], metrics: Option<&String>) -> Response {
+    let me = crate::cluster::identity();
+    let asked: Vec<String> =
+        metrics.map(|m| m.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    // a metric the path names that this node does not report is passed over,
+    // as the reference passes it over
+    let keep = |v: &mut Value| {
+        if asked.is_empty() || asked.iter().any(|m| m == "_all") {
+            return;
         }
-        return super::hot_threads::hot_threads(&format!("/_nodes/{rest}"), &p).await;
-    }
-    nodes_info(Query(p)).await
-}
-
-/// A write under `/_nodes`: rereading the keystore is the only one.
-pub async fn nodes_post(Path(rest): Path<String>, Query(p): Query<Params>) -> Response {
-    if rest.split('/').next_back() == Some("reload_secure_settings") {
-        return nodes_reload_secure_settings(Query(p)).await;
-    }
-    crate::api::err(
-        axum::http::StatusCode::NOT_IMPLEMENTED,
-        "not_implemented_exception",
-        "not ported yet",
-    )
-}
-
-pub async fn nodes_info(Query(p): Query<Params>) -> Response {
-    let live = crate::cluster::current_state();
-    let mut others = serde_json::Map::new();
-    for (id, n) in &live.nodes {
-        if *id == crate::cluster::identity().id {
+        if let Some(o) = v.as_object_mut() {
+            const IDENTITY: &[&str] = &[
+                "name",
+                "transport_address",
+                "host",
+                "ip",
+                "version",
+                "build_type",
+                "build_hash",
+                "roles",
+                "attributes",
+            ];
+            o.retain(|k, _| IDENTITY.contains(&k.as_str()) || asked.iter().any(|m| m == k));
+        }
+    };
+    let mut reported = serde_json::Map::new();
+    for id in nodes {
+        if *id != me.id.as_str() {
+            let Some((name, mut rest)) = other_node_identity(id) else { continue };
+            if let Some(o) = rest.as_object_mut() {
+                o.insert("name".into(), name);
+                o.insert("version".into(), json!("3.9.0"));
+                o.insert("build_type".into(), json!("tar"));
+                o.insert("build_hash".into(), json!("velosearch"));
+            }
+            keep(&mut rest);
+            reported.insert(id.clone(), rest);
             continue;
         }
-        let ip =
-            n.transport_address.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_default();
-        others.insert(
-            id.as_str().to_string(),
-            json!({
-                "name": n.name, "transport_address": n.transport_address, "host": ip, "ip": ip,
-                "version": "3.9.0", "build_type": "tar", "build_hash": "velosearch",
-                "roles": n.roles, "attributes": n.attributes,
-            }),
-        );
-    }
-    let mut body = json!({
-        "_nodes": {"total": live.nodes.len().max(1), "successful": live.nodes.len().max(1), "failed": 0},
-        "cluster_name": crate::cluster::identity().cluster_name,
-        "nodes": {crate::cluster::identity().id.as_str(): {
-            "name": crate::cluster::identity().name, "transport_address": crate::cluster::identity().transport_address,
-            "host": crate::cluster::identity().host, "ip": crate::cluster::identity().host, "version": "3.9.0",
-            "build_type": "tar", "build_hash": "velosearch", "roles": crate::cluster::identity().roles,
-            "attributes": crate::cluster::identity().attributes,
+        let mut local = json!({
+            "name": me.name, "transport_address": me.transport_address,
+            "host": me.host, "ip": me.host, "version": "3.9.0",
+            "build_type": "tar", "build_hash": "velosearch", "roles": me.roles,
+            "attributes": me.attributes,
             "os": {"refresh_interval_in_millis": 1000,
                    "available_processors": num_cpus(),
                    "allocated_processors": num_cpus()},
             "process": {"refresh_interval_in_millis": 1000, "id": std::process::id(),
                         "mlockall": false},
-            "plugins": plugins(), "modules": modules(), "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
+            "plugins": plugins(), "modules": modules(),
+            "ingest": {"processors": crate::ingest::PROCESSOR_TYPES.iter().map(|t| json!({"type": t})).collect::<Vec<_>>()},
             "search_pipelines": {
                 "request_processors": crate::search::pipeline::REQUEST_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
                 "response_processors": crate::search::pipeline::RESPONSE_PROCESSORS.iter().map(|t| json!({"type": t})).collect::<Vec<_>>(),
@@ -820,8 +969,8 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
             "thread_pool": {},
             // where the other nodes of the cluster reach this one
             "transport": {
-                "bound_address": [crate::cluster::identity().transport_address.clone()],
-                "publish_address": crate::cluster::identity().transport_address.clone(),
+                "bound_address": [me.transport_address.clone()],
+                "publish_address": me.transport_address.clone(),
                 "profiles": {},
             },
             // where a client -- or another cluster reindexing from this
@@ -831,78 +980,75 @@ pub async fn nodes_info(Query(p): Query<Params>) -> Response {
                 "publish_address": crate::api::bound_address(),
                 "max_content_length_in_bytes": crate::api::max_content_bytes(),
             },
-        }},
-    });
-    if let Some(nodes) = body.get_mut("nodes").and_then(|n| n.as_object_mut()) {
-        for (k, v) in others {
-            nodes.insert(k, v);
-        }
+        });
+        keep(&mut local);
+        reported.insert(id.clone(), local);
     }
-    respond(&p, body)
+    respond(
+        p,
+        json!({
+            "_nodes": nodes_header(nodes),
+            "cluster_name": me.cluster_name,
+            "nodes": Value::Object(reported),
+        }),
+    )
 }
 
 /// `_nodes/usage` -- how much of the API each node has been asked for.
 ///
 /// A node reports when it started counting and what it counted since; the
 /// counts themselves are not kept here, so the lists are empty rather than
-/// invented.
-pub async fn nodes_usage(Query(p): Query<Params>) -> Response {
-    let live = crate::cluster::current_state();
+/// invented. A metric in the path picks which of the two lists is reported.
+fn nodes_usage(p: &Params, nodes: &[String], metrics: Option<&String>) -> Response {
     let me = crate::cluster::identity();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let mut nodes = serde_json::Map::new();
-    let listed: Vec<(String, String)> = if live.nodes.is_empty() {
-        vec![(me.id.as_str().to_string(), me.name.clone())]
-    } else {
-        live.nodes.values().map(|n| (n.id.as_str().to_string(), n.name.clone())).collect()
-    };
-    for (id, _name) in listed {
-        nodes.insert(
-            id,
-            json!({
-                "timestamp": now,
-                "since": now,
-                "rest_actions": {},
-                "aggregations": {},
-            }),
-        );
+    let now = crate::store::now_millis();
+    let asked: Vec<String> =
+        metrics.map(|m| m.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_default();
+    let wanted = |name: &str| asked.is_empty() || asked.iter().any(|m| m == "_all" || m == name);
+    let mut reported = serde_json::Map::new();
+    for id in nodes {
+        let mut one = json!({"timestamp": now, "since": now});
+        if let Some(o) = one.as_object_mut() {
+            if wanted("rest_actions") {
+                o.insert("rest_actions".into(), json!({}));
+            }
+            if wanted("aggregations") {
+                o.insert("aggregations".into(), json!({}));
+            }
+        }
+        reported.insert(id.clone(), one);
     }
-    let total = nodes.len();
     crate::api::respond(
-        &p,
+        p,
         json!({
-            "_nodes": {"total": total, "successful": total, "failed": 0},
+            "_nodes": nodes_header(nodes),
             "cluster_name": me.cluster_name,
-            "nodes": Value::Object(nodes),
+            "nodes": Value::Object(reported),
         }),
     )
 }
 
 /// `_nodes/reload_secure_settings` -- read the keystore again.
 ///
-/// There is no keystore to reread here, so every node answers that it did.
-pub async fn nodes_reload_secure_settings(Query(p): Query<Params>) -> Response {
-    let live = crate::cluster::current_state();
+/// There is no keystore to reread here, so every node named answers that it
+/// did.
+fn nodes_reload_secure_settings(p: &Params, nodes: &[String]) -> Response {
     let me = crate::cluster::identity();
-    let mut nodes = serde_json::Map::new();
-    let listed: Vec<(String, String)> = if live.nodes.is_empty() {
-        vec![(me.id.as_str().to_string(), me.name.clone())]
-    } else {
-        live.nodes.values().map(|n| (n.id.as_str().to_string(), n.name.clone())).collect()
-    };
-    for (id, name) in listed {
-        nodes.insert(id, json!({"name": name}));
+    let mut reported = serde_json::Map::new();
+    for id in nodes {
+        let name = if *id == me.id.as_str() {
+            json!(me.name)
+        } else {
+            other_node_identity(id).map(|(n, _)| n).unwrap_or(Value::Null)
+        };
+        reported.insert(id.clone(), json!({"name": name}));
     }
-    let total = nodes.len();
     crate::api::respond(
-        &p,
+        p,
         json!({
-            "_nodes": {"total": total, "successful": total, "failed": 0},
+            "_nodes": nodes_header(nodes),
             "cluster_name": me.cluster_name,
-            "nodes": Value::Object(nodes),
+            "nodes": Value::Object(reported),
         }),
     )
 }

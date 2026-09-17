@@ -423,6 +423,10 @@ impl Store {
         if let Some(security) = self.security.wire() {
             customs["security"] = security;
         }
+        let awareness = self.awareness.read().clone();
+        if awareness.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            customs["awareness"] = awareness;
+        }
         customs
     }
 
@@ -451,6 +455,70 @@ impl Store {
                 .and_then(|o| o.as_object())
                 .map(|o| o.iter().map(|(repo, held)| (repo.clone(), map(Some(held)))).collect())
                 .unwrap_or_default();
+        }
+        let published = v.get("awareness").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if published != *self.awareness.read() {
+            *self.awareness.write() = published;
+            self.save_awareness();
+        }
+    }
+}
+
+/// Where the awareness metadata is written down, under the node's data
+/// directory beside the coordination state.
+const AWARENESS_FILE: &str = "awareness.json";
+
+impl Store {
+    /// The weights set for one awareness attribute, and the version the
+    /// metadata is at: `{"awareness": {"zone": {...}}, "_version": n}`.
+    /// `None` until something is put.
+    pub fn weighted_routing(&self) -> Option<Value> {
+        self.awareness.read().get("weighted_routing").cloned()
+    }
+
+    /// The decommission the cluster is under: the attribute and value asked
+    /// for, the status it reached, and the id of the request that asked.
+    pub fn decommission(&self) -> Option<Value> {
+        self.awareness.read().get("decommission").cloned()
+    }
+
+    /// Replace one half of the awareness metadata, and write both down.
+    /// `None` takes the section out.
+    pub fn set_awareness(&self, key: &str, value: Option<Value>) {
+        {
+            let mut g = self.awareness.write();
+            let Some(o) = g.as_object_mut() else { return };
+            match value {
+                Some(v) => o.insert(key.to_string(), v),
+                None => o.remove(key),
+            };
+        }
+        self.save_awareness();
+    }
+
+    /// Write the awareness metadata whole. A torn file would answer a client
+    /// with half of what was put, so it is replaced rather than appended to.
+    fn save_awareness(&self) {
+        let Some(dir) = self.data_dir.as_ref() else { return };
+        let dir = dir.join("_state");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let body = self.awareness.read().to_string();
+        if let Err(e) = crate::store::write_atomic(&dir.join(AWARENESS_FILE), body.as_bytes()) {
+            tracing::warn!("the awareness metadata could not be written down: {e}");
+        }
+    }
+
+    /// Read back what was written down, when the node comes up on a data
+    /// directory it used before.
+    pub(crate) fn load_awareness(&self) {
+        let Some(dir) = self.data_dir.as_ref() else { return };
+        let path = dir.join("_state").join(AWARENESS_FILE);
+        let Ok(raw) = std::fs::read_to_string(&path) else { return };
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => *self.awareness.write() = v,
+            _ => tracing::warn!("{} does not hold awareness metadata", path.display()),
         }
     }
 }

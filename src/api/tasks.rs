@@ -158,22 +158,7 @@ pub async fn get_task(
     }
     let missing = format!("task [{id}] isn't running and hasn't stored its results");
     if !known_node(node) {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({
-                "error": {
-                    "root_cause": [{"type": "resource_not_found_exception", "reason": missing}],
-                    "type": "resource_not_found_exception",
-                    "reason": format!(
-                        "task [{id}] belongs to the node [{node}] which isn't part of the cluster \
-                         and there is no record of the task"
-                    ),
-                    "caused_by": {"type": "resource_not_found_exception", "reason": missing},
-                },
-                "status": 404,
-            })),
-        )
-            .into_response();
+        return unknown_node_task(&id, node, &missing);
     }
     match stored {
         // the index is there and the task is not in it
@@ -186,6 +171,119 @@ pub async fn get_task(
             "no such index [.tasks]",
         ),
     }
+}
+
+/// `DELETE /_tasks/{id}` -- forget what a finished task kept.
+///
+/// This takes the record out of `.tasks`; it does not stop anything. A task
+/// that is still running is a conflict, and the caller is pointed at the
+/// cancel API, as the reference points them. A task with no record is not
+/// found, with the same two shapes `GET` uses: a node the cluster does not
+/// have says so, and a missing `.tasks` index is named as the cause.
+pub async fn delete_task(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    Query(p): Query<Params>,
+) -> Response {
+    let node = match named(&id) {
+        Ok(Named::Task(node, n)) => {
+            if is_me(node) && crate::tasks::get(n).is_some() {
+                return err(
+                    StatusCode::CONFLICT,
+                    "status_exception",
+                    format!(
+                        "task [{id}] is still running and cannot be deleted; use the cancel \
+                         tasks API to cancel running tasks"
+                    ),
+                );
+            }
+            node
+        }
+        // the work an open or a resize was reported under keeps no record
+        Ok(Named::Described(node, _)) => node,
+        Err(refusal) => return refusal,
+    };
+    let missing = format!("task [{id}] isn't running and hasn't stored its results");
+    let Some(st) = store.get(".tasks") else {
+        if !known_node(node) {
+            return unknown_node_task(&id, node, &missing);
+        }
+        return err_caused_by_status(
+            StatusCode::NOT_FOUND,
+            "resource_not_found_exception",
+            &missing,
+            "index_not_found_exception",
+            "no such index [.tasks]",
+        );
+    };
+    let held = crate::api::read_source(&st.read(), &id).is_some();
+    if !held {
+        if !known_node(node) {
+            return unknown_node_task(&id, node, &missing);
+        }
+        return err(StatusCode::NOT_FOUND, "resource_not_found_exception", missing);
+    }
+    // a record with children under it is deleted after them, so that no
+    // child's result is left with no parent to find it by
+    if let Some(parent) = crate::tasks::parse_id(&id).map(|(_, n)| n)
+        && !crate::tasks::children(parent).is_empty()
+    {
+        return err(
+            StatusCode::CONFLICT,
+            "status_exception",
+            format!(
+                "task [{id}] has running child tasks and cannot be deleted; wait for or cancel \
+                 child tasks first"
+            ),
+        );
+    }
+    let ops: crate::cluster::replication::Writes = Default::default();
+    let gone = {
+        let store = store.clone();
+        let id = id.clone();
+        let noted = ops.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::cluster::replication::WRITES.sync_scope(noted, || {
+                let Some(st) = store.get(".tasks") else { return false };
+                let mut g = st.write();
+                let (_, status) = crate::api::delete_doc(&mut g, &id);
+                let _ = g.sync_translog();
+                status.is_success()
+            })
+        })
+        .await
+        .unwrap_or(false)
+    };
+    let recorded = std::mem::take(&mut *ops.lock());
+    if !recorded.is_empty() {
+        let _ =
+            crate::cluster::replication::finish(StatusCode::OK.into_response(), recorded, "").await;
+    }
+    if !gone {
+        return err(StatusCode::NOT_FOUND, "resource_not_found_exception", missing);
+    }
+    respond(&p, json!({"acknowledged": true}))
+}
+
+/// A task named for a node the cluster does not have: the reason says the
+/// node is not here, and the cause says there is no record either.
+fn unknown_node_task(id: &str, node: &str, missing: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(json!({
+            "error": {
+                "root_cause": [{"type": "resource_not_found_exception", "reason": missing}],
+                "type": "resource_not_found_exception",
+                "reason": format!(
+                    "task [{id}] belongs to the node [{node}] which isn't part of the cluster \
+                     and there is no record of the task"
+                ),
+                "caused_by": {"type": "resource_not_found_exception", "reason": missing},
+            },
+            "status": 404,
+        })),
+    )
+        .into_response()
 }
 
 /// The finished work an open or a resize sent off was reported under.

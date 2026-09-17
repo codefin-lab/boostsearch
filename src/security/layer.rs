@@ -944,6 +944,18 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
         (true, _, "DELETE") if !tail.starts_with('_') => "indices:data/write/delete",
         (true, _, _) if !tail.starts_with('_') => "indices:data/write/index",
         (false, "_cluster", _) => match rest.get(1).copied().unwrap_or("") {
+            // the weights a zone's shards are searched by, and taking a zone
+            // out of service: each is its own permission in the reference,
+            // and judging them all as `cluster:monitor/state` let a caller
+            // with a monitoring role weigh a zone to nothing
+            "routing" if m == "GET" => "cluster:admin/routing/awareness/weights/get",
+            "routing" if m == "DELETE" => "cluster:admin/routing/awareness/weights/delete",
+            "routing" => "cluster:admin/routing/awareness/weights/put",
+            "decommission" if m == "GET" => "cluster:admin/decommission/awareness/get",
+            "decommission" if m == "DELETE" => "cluster:admin/decommission/awareness/delete",
+            "decommission" => "cluster:admin/decommission/awareness/put",
+            // the old spelling of `_nodes`, which the hot threads API names
+            "nodes" => "cluster:monitor/nodes/hot_threads",
             "health" => "cluster:monitor/health",
             "state" => "cluster:monitor/state",
             "stats" => "cluster:monitor/stats",
@@ -971,7 +983,21 @@ pub fn action_for(method: &Method, path: &str) -> Option<String> {
             "templates" => "indices:admin/template/get",
             _ => "cluster:monitor/state",
         },
+        // forgetting a finished task's record is a write, not monitoring
+        (false, "_tasks", "DELETE") if rest.last() != Some(&"_cancel") => {
+            "cluster:admin/tasks/delete"
+        }
         (false, "_tasks", _) => "cluster:monitor/task",
+        // index data on disk that the cluster does not claim: listing it is
+        // monitoring, bringing it in or throwing it away is not
+        (false, "_dangling", "GET" | "HEAD") => "cluster:admin/indices/dangling/list",
+        (false, "_dangling", "DELETE") => "cluster:admin/indices/dangling/delete",
+        (false, "_dangling", _) => "cluster:admin/indices/dangling/import",
+        // a shard's remote segment store: recovering from it writes indices
+        (false, "_remotestore", _) if rest.get(1) == Some(&"stats") => {
+            "cluster:monitor/_remotestore/stats"
+        }
+        (false, "_remotestore", _) => "cluster:admin/remotestore/restore",
         (false, "_template", "GET" | "HEAD") => "indices:admin/template/get",
         (false, "_template", "DELETE") => "indices:admin/template/delete",
         (false, "_template", _) => "indices:admin/template/put",

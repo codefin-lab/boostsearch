@@ -100,6 +100,11 @@ pub fn classify(method: &Method, path: &str) -> Target {
             "_cluster" => match first_segment(rest).0 {
                 "settings" | "voting_config_exclusions" if is_write => Target::Manager,
                 "settings" => Target::Manager,
+                // the weights and the decommission are the cluster's
+                // metadata, kept by the manager and published with the rest
+                // of it: written where they landed, they lived on that node
+                // until the next publish took them away again
+                "routing" | "decommission" if is_write => Target::Manager,
                 _ => Target::Local,
             },
             "_template"
